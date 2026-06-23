@@ -60,8 +60,9 @@ st.sidebar.header("⚙️ 运行参数配置")
 st.sidebar.subheader("选择待查询的渠道")
 active_sites = []
 for site_id, config in CREDENTIALS.items():
-    # Only list the 5 core sites for now
-    if site_id in ["szlcsc", "ickey", "hqew", "mouser", "digikey"]:
+    # Show all sites that have a scraper implementation
+    implemented = {"szlcsc", "ickey", "hqew", "mouser", "digikey"}
+    if site_id in implemented:
         checked = st.sidebar.checkbox(config["name"], value=True, key=f"site_{site_id}")
         if checked:
             active_sites.append(site_id)
@@ -148,8 +149,8 @@ if uploaded_file is not None:
                         )
                     
                     st.success("🎉 比价比对任务圆满完成！")
-                    progress_bar.progress(100)
-                    status_text.text("进度: 100/100% 已完成")
+                    progress_bar.progress(1.0)
+                    status_text.text("进度: 100% 已完成")
                     info_area.empty()
                     
                     # Read final results table for preview

@@ -26,7 +26,7 @@ def read_purchase_list(file_path_or_stream) -> List[Dict[str, Any]]:
         col_str = str(col).strip()
         if col_str in ["型号", "Part Number", "Part Number/型号", "Material", "物料型号"]:
             col_mapping[col] = "model"
-        elif col_str in ["品牌", "Brand", "品牌/Manufacturer", "厂牌"]:
+        elif col_str in ["品牌", "Brand", "品牌/Manufacturer", "厂牌", "制造商", "Manufacturer", "厂商", "生产商"]:
             col_mapping[col] = "brand"
         elif col_str in ["数量", "采购数量", "Quantity", "Qty", "QTY", "需求数量", "总数量", "采购数", "总需数量", "数量(pcs)", "用量"]:
             col_mapping[col] = "quantity"
