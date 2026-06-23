@@ -25,7 +25,8 @@ CREDENTIALS = {
         "url": "https://www.mouser.cn",
         "login_url": "https://www.mouser.cn/MyAccount/Login",
         "username": "大浪淘金754",
-        "password": "Lxf861211-"
+        "password": "Lxf861211-",
+        "api_key": "",  # Mouser Search API Key (申请地址: https://www.mouser.com/api-hub/)
     },
     "element14": {
         "name": "element14",

@@ -3,7 +3,7 @@ import time
 import logging
 from datetime import datetime
 from typing import Dict, Any, Optional
-from playwright.sync_api import BrowserContext, Page, Playwright
+from playwright.sync_api import Browser, BrowserContext, Page, Playwright
 from config import CREDENTIALS, TIMEOUT, SESSIONS_DIR
 from utils.browser_manager import create_browser_context, init_page, get_session_path
 from utils.exchange_rate import get_usd_to_cny_rate
@@ -14,7 +14,7 @@ class BaseScraper:
     def __init__(self, site_id: str, headless: bool = False):
         self.site_id = site_id
         self.headless = headless
-        
+
         # Load credentials
         site_config = CREDENTIALS.get(site_id, {})
         self.name = site_config.get("name", site_id)
@@ -23,7 +23,7 @@ class BaseScraper:
         self.username = site_config.get("username", "")
         self.password = site_config.get("password", "")
         self.state_path = get_session_path(site_id)
-        
+
         # Cached live exchange rate
         self._exchange_rate = None
 
@@ -36,38 +36,47 @@ class BaseScraper:
     def log(self, message: str, level=logging.INFO):
         logger.log(level, f"[{self.name}] {message}")
 
-    def execute(self, playwright: Playwright, model: str, quantity: int) -> Dict[str, Any]:
+    def execute(
+        self,
+        playwright: Playwright,
+        model: str,
+        quantity: int,
+        browser: Browser = None,
+    ) -> Dict[str, Any]:
         """
         Main execution flow.
-        1. Launches browser with saved session if available.
-        2. Tries to search and extract.
-        3. If it detects login is required, executes login and retries.
-        4. Closes browser and returns result.
+
+        If *browser* is supplied the scraper creates a new context on that
+        existing browser process instead of launching its own – this avoids
+        the overhead of starting / stopping a browser for every query.
         """
         self.log(f"Starting query for Model: {model}, Qty: {quantity}")
         context = None
         page = None
+        owns_browser = browser is None
         result = self.get_empty_result(model, quantity)
 
         try:
-            # 1. Initialize context & page
-            context = create_browser_context(playwright, headless=self.headless, state_path=self.state_path)
+            # 1. Initialize context & page (reuse browser when provided)
+            context = create_browser_context(
+                playwright,
+                headless=self.headless,
+                state_path=self.state_path,
+                existing_browser=browser,
+            )
             page = init_page(context)
 
             # 2. Try guest / saved session search
             try:
                 result = self.search_and_extract(page, model, quantity)
-                # Check if we got redirected to login or result is empty due to login required
                 if result.get("_login_required", False):
                     self.log("Session expired or login required. Initiating login flow...")
                     if self.login(context, page):
-                        # Retry extraction after successful login
                         result = self.search_and_extract(page, model, quantity)
                     else:
                         result["货期"] = "登录失败"
             except Exception as extract_err:
                 self.log(f"Extraction error (might need login): {extract_err}", logging.WARNING)
-                # Try logging in and retrying
                 if self.login(context, page):
                     result = self.search_and_extract(page, model, quantity)
                 else:
@@ -77,16 +86,19 @@ class BaseScraper:
             self.log(f"Failed to query: {e}", logging.ERROR)
             result["货期"] = f"查询失败: {str(e)[:50]}"
         finally:
+            # Only close the context; do NOT close the browser when it was
+            # provided externally – the caller manages the browser lifetime.
             if context:
                 try:
                     context.close()
                 except Exception:
                     pass
+            if owns_browser and context:
                 try:
                     context.browser.close()
                 except Exception:
                     pass
-        
+
         # Remove internal control flags
         if "_login_required" in result:
             del result["_login_required"]
@@ -132,7 +144,7 @@ class BaseScraper:
             "来源网站": self.name,
             "渠道链接": self.url,
             "原始币种价格": "无",
-            "查询时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            "查询时间": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
     def convert_price_to_cny(self, price_str: str, original_currency: str = "USD") -> tuple:
@@ -141,10 +153,9 @@ class BaseScraper:
         Returns (cny_price, original_price_str)
         """
         try:
-            # Clean non-numeric characters except decimal point
             clean_price = "".join(c for c in price_str if c.isdigit() or c == '.')
             price_val = float(clean_price)
-            
+
             if original_currency.upper() == "USD":
                 cny_price = round(price_val * self.exchange_rate, 4)
                 return cny_price, f"{price_val:.4f} USD"
@@ -159,26 +170,21 @@ class BaseScraper:
     def wait_for_human_intervention(self, page: Page, message: str, check_selector: str, timeout_sec: int = 180):
         """
         Helper for human-in-the-loop validation.
-        Brings the page to front, logs a message, and waits for a selector to appear (meaning validation passed)
-        or a timeout to occur.
         """
-        self.log(f"⚠️ {message}", logging.WARNING)
+        self.log(f"WARNING: {message}", logging.WARNING)
         page.bring_to_front()
-        
-        # Audio alert if possible (cross-platform visual beep / console alert)
-        print("\a", end="") # standard terminal beep
-        
+        print("\a", end="")
+
         start_time = time.time()
         while time.time() - start_time < timeout_sec:
             try:
-                # Check if check_selector is visible, indicating success
                 if page.is_visible(check_selector):
                     self.log("Verification check passed! Resuming automation...")
                     return True
             except Exception:
                 pass
             time.sleep(2)
-        
+
         raise TimeoutError(f"等待人工介入校验超时（超过 {timeout_sec} 秒）")
 
     def handle_captcha_or_block(self, page: Page, timeout_sec: int = 180) -> bool:
@@ -197,24 +203,29 @@ class BaseScraper:
         except Exception:
             title = ""
 
-        if any(kw in title for kw in ["Just a moment...", "Verify you are human", "Attention Required", "Access Denied", "Cloudflare", "Access denied", "403 Forbidden"]):
+        block_keywords = [
+            "Just a moment...", "Verify you are human",
+            "Attention Required", "Access Denied", "Access denied",
+            "Cloudflare", "403 Forbidden",
+        ]
+        if any(kw in title for kw in block_keywords):
             is_captcha = True
             reason = f"安全防护页面 (Title: {title})"
 
         captcha_selectors = [
-            "#challenge-running", 
-            ".cf-turnstile", 
-            "#cf-challenge-body", 
+            "#challenge-running",
+            ".cf-turnstile",
+            "#cf-challenge-body",
             "#px-captcha",
-            ".geetest_slider", 
-            ".geetest_radar", 
+            ".geetest_slider",
+            ".geetest_radar",
             "iframe[src*='geetest']",
             ".captcha-dialog",
             "iframe[src*='captcha']",
             "iframe[src*='recaptcha']",
-            "iframe[src*='hcaptcha']"
+            "iframe[src*='hcaptcha']",
         ]
-        
+
         if not is_captcha:
             for sel in captcha_selectors:
                 try:
@@ -228,39 +239,46 @@ class BaseScraper:
         if not is_captcha:
             try:
                 body_text = page.locator("body").inner_text()
-                if "Access Denied" in body_text or "403 Forbidden" in body_text or "您的请求被拒绝" in body_text or "我访问的页面不在地球了" in body_text:
+                denied_phrases = [
+                    "Access Denied", "403 Forbidden",
+                    "您的请求被拒绝", "我访问的页面不在地球了",
+                ]
+                if any(p in body_text for p in denied_phrases):
                     is_captcha = True
                     reason = "网页访问被拒绝或页面不存在"
             except Exception:
                 pass
 
         if is_captcha:
-            self.log(f"⚠️ 检测到 {reason}。请在弹出的浏览器中手动完成验证/拖动滑块。", logging.WARNING)
+            self.log(f"WARNING: 检测到 {reason}。请在弹出的浏览器中手动完成验证/拖动滑块。", logging.WARNING)
             page.bring_to_front()
-            print("\a", end="") # Terminal alert beep
-            
+            print("\a", end="")
+
             start_time = time.time()
             while time.time() - start_time < timeout_sec:
                 time.sleep(3)
                 try:
                     curr_title = page.title()
-                    if not any(kw in curr_title for kw in ["Just a moment...", "Verify you are human", "Attention Required", "Access Denied", "Access denied", "403 Forbidden"]):
+                    if not any(kw in curr_title for kw in block_keywords):
                         still_visible = False
                         for sel in captcha_selectors:
-                            if page.locator(sel).first.is_visible():
-                                still_visible = True
-                                break
+                            try:
+                                if page.locator(sel).first.is_visible():
+                                    still_visible = True
+                                    break
+                            except Exception:
+                                pass
                         if not still_visible:
                             curr_body = page.locator("body").inner_text()
-                            if "Access Denied" not in curr_body and "403 Forbidden" not in curr_body and "我访问的页面不在地球了" not in curr_body:
+                            if not any(p in curr_body for p in ["Access Denied", "403 Forbidden", "我访问的页面不在地球了"]):
                                 self.log("验证已通过或页面已刷新，继续运行...")
                                 time.sleep(1.5)
                                 return True
                 except Exception:
                     pass
-            
+
             raise TimeoutError(f"等待人工解决验证码超时（超过 {timeout_sec} 秒）")
-        
+
         return False
 
     def safe_goto(self, page: Page, url: str, timeout_sec: int = 180) -> bool:
@@ -274,13 +292,24 @@ class BaseScraper:
             page.wait_for_load_state("load")
         except Exception as e:
             self.log(f"页面加载失败: {e}", logging.WARNING)
+            # Check if the page is still usable
+            try:
+                page.title()
+            except Exception:
+                # Page/context has been destroyed (e.g. net::ERR_CONNECTION_CLOSED)
+                self.log("Page is no longer reachable after navigation failure.", logging.ERROR)
+                raise e
+
             if self.headless:
                 raise e
-            
-            self.log(f"⚠️ 页面加载失败 ({e})。请在浏览器中检查网络、代理并手动刷新。", logging.WARNING)
-            page.bring_to_front()
+
+            self.log(f"WARNING: 页面加载失败 ({e})。请在浏览器中检查网络、代理并手动刷新。", logging.WARNING)
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
             print("\a", end="")
-            
+
             start_time = time.time()
             success = False
             while time.time() - start_time < timeout_sec:
@@ -288,7 +317,7 @@ class BaseScraper:
                 try:
                     title = page.title()
                     body = page.locator("body").inner_text().strip()
-                    if title and len(body) > 50 and "Access Denied" not in body and "403 Forbidden" not in body and "我访问的页面不在地球了" not in body:
+                    if title and len(body) > 50 and "Access Denied" not in body and "403 Forbidden" not in body:
                         self.log("页面加载成功，继续执行...")
                         success = True
                         break
@@ -296,8 +325,7 @@ class BaseScraper:
                     pass
             if not success:
                 raise TimeoutError(f"等待人工刷新页面超时（超过 {timeout_sec} 秒）")
-        
+
         # Post-navigation captcha check
         self.handle_captcha_or_block(page, timeout_sec=timeout_sec)
         return True
-
