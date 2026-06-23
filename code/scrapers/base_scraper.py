@@ -292,11 +292,22 @@ class BaseScraper:
             page.wait_for_load_state("load")
         except Exception as e:
             self.log(f"页面加载失败: {e}", logging.WARNING)
+            # Check if the page is still usable
+            try:
+                page.title()
+            except Exception:
+                # Page/context has been destroyed (e.g. net::ERR_CONNECTION_CLOSED)
+                self.log("Page is no longer reachable after navigation failure.", logging.ERROR)
+                raise e
+
             if self.headless:
                 raise e
 
             self.log(f"WARNING: 页面加载失败 ({e})。请在浏览器中检查网络、代理并手动刷新。", logging.WARNING)
-            page.bring_to_front()
+            try:
+                page.bring_to_front()
+            except Exception:
+                pass
             print("\a", end="")
 
             start_time = time.time()

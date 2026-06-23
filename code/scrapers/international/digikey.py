@@ -15,8 +15,12 @@ class DigikeyScraper(BaseScraper):
     def login(self, context: BrowserContext, page: Page) -> bool:
         """Logs into Digi-Key."""
         self.log(f"Navigating to login page: {self.login_url}")
-        page.goto(self.login_url)
-        page.wait_for_load_state("networkidle")
+        try:
+            page.goto(self.login_url, timeout=30000)
+            page.wait_for_load_state("networkidle")
+        except Exception as e:
+            self.log(f"Login page load failed: {e}", logging.WARNING)
+            return False
 
         if "login" not in page.url.lower():
             self.log("Already logged in (based on URL redirect).")
@@ -73,13 +77,67 @@ class DigikeyScraper(BaseScraper):
         search_url = f"https://www.digikey.cn/zh/products?keywords={encoded_model}"
         self.log(f"Searching for model: {model} using URL: {search_url}")
 
-        self.safe_goto(page, search_url)
+        # Use a gentle navigation approach – catch connection errors gracefully
+        try:
+            self.safe_goto(page, search_url)
+        except Exception as nav_err:
+            self.log(f"Navigation failed: {nav_err}", logging.WARNING)
+            result = self.get_empty_result(model, quantity)
+            result["渠道链接"] = search_url
+            result["查询时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            result["货期"] = f"页面加载失败: {str(nav_err)[:40]}"
+            return result
+
         page.wait_for_timeout(3000)
 
-        # Check if redirected directly to detail page
+        # Check if page is a verification / block page
+        try:
+            page_text = page.locator("body").inner_text()
+            block_phrases = [
+                "访问暂时受限", "Access Denied", "403 Forbidden",
+                "Just a moment", "Verify you are human",
+            ]
+            if any(phrase in page_text for phrase in block_phrases):
+                self.log("Detected access block page on Digi-Key.", logging.WARNING)
+                if not self.headless:
+                    self.handle_captcha_or_block(page, timeout_sec=120)
+                else:
+                    result = self.get_empty_result(model, quantity)
+                    result["渠道链接"] = page.url
+                    result["查询时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    result["货期"] = "访问受限(需人工验证)"
+                    return result
+        except Exception:
+            pass
+
+        # Check if redirected to detail page
         if "/product-detail/" in page.url or "/productdetail/" in page.url.lower():
             self.log("Directly redirected to product detail page.")
             return self._extract_details(page, model, quantity)
+
+        # Digi-Key sometimes redirects to /zhs/models/ (datasheet page, not product)
+        # These pages don't have price info, need to find the actual product link
+        if "/models/" in page.url or "/zhs/models/" in page.url:
+            self.log("Redirected to models/datasheet page, looking for product link...")
+            prod_link = page.locator(
+                "a[href*='/product-detail/'], a[href*='/zh/products/detail/']"
+            ).first
+            try:
+                if prod_link.is_visible():
+                    href = prod_link.get_attribute("href") or ""
+                    target = self._normalise_url(href)
+                    self.log(f"Found product link on models page: {target}")
+                    self.safe_goto(page, target)
+                    page.wait_for_timeout(2000)
+                    return self._extract_details(page, model, quantity)
+            except Exception:
+                pass
+            # No product link found on models page
+            result = self.get_empty_result(model, quantity)
+            result["渠道链接"] = page.url
+            result["查询时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            result["货期"] = "仅找到数据手册页(无价格)"
+            return result
 
         # Search results page
         product_links = page.locator(
@@ -116,7 +174,16 @@ class DigikeyScraper(BaseScraper):
             return result
 
         self.log(f"Navigating to detail page: {target_url}")
-        self.safe_goto(page, target_url)
+        try:
+            self.safe_goto(page, target_url)
+        except Exception as nav_err:
+            self.log(f"Detail page navigation failed: {nav_err}", logging.WARNING)
+            result = self.get_empty_result(model, quantity)
+            result["渠道链接"] = target_url
+            result["查询时间"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            result["货期"] = f"详情页加载失败: {str(nav_err)[:30]}"
+            return result
+
         page.wait_for_timeout(2000)
 
         return self._extract_details(page, model, quantity)
