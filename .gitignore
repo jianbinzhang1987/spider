@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+code/sessions/
+sessions/
+progress_cache.json
+temp_input_bom.xlsx
+temp_output_compare.xlsx
+比价结果汇总.xlsx
+*.png
+.DS_Store
+.vscode/
+.idea/
+*.log

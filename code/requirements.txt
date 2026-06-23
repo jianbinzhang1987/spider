@@ -1,0 +1,7 @@
+streamlit
+playwright
+playwright-stealth
+pandas
+openpyxl
+httpx
+beautifulsoup4
