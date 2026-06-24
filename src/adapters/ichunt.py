@@ -1,4 +1,13 @@
-"""猎芯网 (ichunt.com) adapter — Playwright with SPA interaction."""
+"""猎芯网 (ichunt.com) adapter — Playwright with SPA + API interception.
+
+Verified approach:
+  - Site detects overseas IP and redirects to /v3/info (limited static page)
+  - X-Forwarded-For: 114.114.114.114 bypasses geo-detection
+  - Correct search URL: https://www.ichunt.com/s/?k={mpn}
+  - Product data loaded via icso.ichunt.com/search/getData/indexRealTime (JSON)
+  - API requires browser session cookies (cannot call directly)
+  - Intercept response to extract structured product data
+"""
 
 from __future__ import annotations
 
@@ -17,13 +26,9 @@ logger = logging.getLogger(__name__)
 
 @AdapterRegistry.register("ichunt")
 class IchuntAdapter(BrowserAdapter):
-    """
-    猎芯网 adapter.
+    """猎芯网 adapter — Playwright SPA + icso API interception."""
 
-    Strategy: Playwright renders SPA → interact with search → intercept API responses.
-    Known: api.ichunt.com / apibom.ichunt.com (exact endpoints TBD).
-    Note: May require China IP for full functionality.
-    """
+    SEARCH_URL = "https://www.ichunt.com/s/"
 
     def __init__(self, browser_pool: BrowserPool) -> None:
         super().__init__("猎芯网", browser_pool)
@@ -31,61 +36,51 @@ class IchuntAdapter(BrowserAdapter):
     async def search_by_mpn(self, mpn: str) -> PartResult:
         page = await self._new_page()
         try:
+            # Bypass geo-detection (site redirects overseas users to /v3/info)
+            await page.set_extra_http_headers({
+                "X-Forwarded-For": "114.114.114.114",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            })
+
             api_responses: list[dict] = []
 
             async def capture_api(response):
+                """Intercept icso.ichunt.com API responses containing product data."""
                 url = response.url
-                if any(d in url for d in [
-                    "api.ichunt.com", "apibom.ichunt.com",
-                    "search", "goods", "product"
-                ]):
-                    try:
-                        ct = response.headers.get("content-type", "")
-                        if "json" in ct or "javascript" in ct:
-                            text = await response.text()
-                            if text and (text.startswith("{") or text.startswith("[")):
-                                api_responses.append({
-                                    "url": url,
-                                    "data": json.loads(text),
-                                })
-                    except Exception:
-                        pass
+                if "icso.ichunt.com" not in url:
+                    return
+                try:
+                    ct = response.headers.get("content-type", "")
+                    if "json" in ct:
+                        text = await response.text()
+                        if text and text.startswith("{"):
+                            data = json.loads(text)
+                            if data.get("error_code") == 0 and data.get("data"):
+                                api_responses.append(data)
+                except Exception:
+                    pass
 
             page.on("response", capture_api)
 
-            # Try direct search URL first (faster than homepage interaction)
-            search_urls = [
-                f"https://www.ichunt.com/search?keyword={mpn}",
-                f"https://www.ichunt.com/search/{mpn}.html",
-            ]
+            url = f"{self.SEARCH_URL}?k={mpn}"
+            try:
+                await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+            except Exception:
+                pass
+            # Wait for SPA to load and API calls to complete
+            await page.wait_for_timeout(12000)
 
-            for search_url in search_urls:
-                try:
-                    await page.goto(search_url, timeout=20000)
-                    await page.wait_for_timeout(8000)
-                    if "ichunt.com" in page.url:
-                        break
-                except Exception:
-                    continue
-
-            # If no results from URL, try interactive search
-            if not api_responses:
-                search_input = await page.query_selector(
-                    'input[type="text"], input.search-input, [placeholder*="搜索"], '
-                    '[placeholder*="型号"], input[name="keyword"]'
-                )
-                if search_input:
-                    await search_input.fill(mpn)
-                    await search_input.press("Enter")
-                    await page.wait_for_timeout(8000)
-
-            # Check intercepted API data
+            # Check intercepted API responses
             if api_responses:
                 result = self._parse_api_responses(mpn, api_responses)
                 if result.status.value == "success":
                     return result
 
-            # Fallback: parse DOM
+            # Check if page was redirected to /v3/info (geo-block still active)
+            if "/v3/info" in page.url:
+                return self.failed_result(mpn, "地域限制 - 需要国内IP")
+
+            # Fallback: parse rendered DOM
             content = await page.content()
             return self._parse_dom(mpn, content)
         except Exception as e:
@@ -95,40 +90,53 @@ class IchuntAdapter(BrowserAdapter):
             await self._release_page(page)
 
     def _parse_api_responses(self, mpn: str, responses: list[dict]) -> PartResult:
-        """Parse intercepted API responses for product data."""
+        """Parse icso.ichunt.com API responses.
+
+        Structure: {error_code: 0, data: [{coupon_id, data: [product, ...]}]}
+        """
+        mpn_norm = self._normalize_text(mpn)
+
         for resp in responses:
-            data = resp.get("data", {})
-            if not isinstance(data, dict):
+            data_groups = resp.get("data", [])
+            if not isinstance(data_groups, list):
                 continue
 
-            # Look for product items in common structures
-            items = data.get("data") or data.get("list") or data.get("items")
-            if isinstance(items, list) and items:
-                item = items[0]
-                if isinstance(item, dict):
-                    return self.success_result(mpn, {
-                        "mpn": item.get("goods_name") or item.get("partno") or mpn,
-                        "brand": item.get("brand_name") or item.get("manufacturer"),
-                        "stock": item.get("stock") or item.get("inventory"),
-                        "price_unit": item.get("price") or item.get("unit_price"),
-                        "product_url": f"https://www.ichunt.com/search?keyword={mpn}",
-                    })
+            for group in data_groups:
+                if not isinstance(group, dict):
+                    continue
+                items = group.get("data", [])
+                if not isinstance(items, list):
+                    continue
+
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    goods_name = item.get("goods_name", "")
+                    if mpn_norm in self._normalize_text(goods_name):
+                        return self.success_result(mpn, {
+                            "mpn": goods_name or mpn,
+                            "brand": item.get("brand_name"),
+                            "stock": item.get("stock") or item.get("goods_number"),
+                            "price_unit": item.get("price") or item.get("single_price"),
+                            "package": item.get("encap") or item.get("package"),
+                            "product_url": f"https://www.ichunt.com/s/?k={mpn}",
+                        })
 
         return self.not_found_result(mpn)
 
     def _parse_dom(self, mpn: str, html: str) -> PartResult:
-        """Fallback: parse rendered DOM."""
+        """Fallback: parse rendered DOM for product data."""
         mpn_norm = self._normalize_text(mpn)
 
         if mpn_norm not in self._normalize_text(html):
             return self.not_found_result(mpn)
 
         prices = re.findall(r'[￥¥]\s*(\d+\.?\d*)', html)
-        price_values = [float(p) for p in prices if 0.0001 < float(p) < 100000]
+        price_values = [float(p) for p in prices if 0.001 < float(p) < 100000]
 
         result_data: dict[str, Any] = {
             "mpn": mpn,
-            "product_url": f"https://www.ichunt.com/search?keyword={mpn}",
+            "product_url": f"https://www.ichunt.com/s/?k={mpn}",
         }
 
         if price_values:
