@@ -317,8 +317,22 @@
                 progressBar.style.width = '100%';
                 progressPct.textContent = '100%';
                 downloadBtn.style.display = 'block';
-                downloadBtn.onclick = () => {
-                    window.location.href = `/api/task/${taskId}/download`;
+                downloadBtn.onclick = async () => {
+                    const resp = await fetch(`/api/task/${taskId}/download`);
+                    if (!resp.ok) {
+                        const data = await resp.json().catch(() => ({}));
+                        alert(data.detail || '下载失败');
+                        return;
+                    }
+                    const blob = await resp.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `比价结果_${taskId}.xlsx`;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    URL.revokeObjectURL(url);
                 };
                 submitBtn.textContent = '开始查询';
                 submitBtn.disabled = false;
