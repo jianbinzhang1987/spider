@@ -113,11 +113,31 @@ class IchuntAdapter(BrowserAdapter):
                         continue
                     goods_name = item.get("goods_name", "")
                     if mpn_norm in self._normalize_text(goods_name):
+                        # Price: try multiple field names
+                        price = (
+                            item.get("price") or item.get("single_price")
+                            or item.get("goods_price") or item.get("cn_price")
+                            or item.get("unit_price") or item.get("sell_price")
+                            or item.get("min_price")
+                        )
+                        # Try ladder/price list
+                        price_breaks = []
+                        ladder = item.get("ladder_price") or item.get("prices") or item.get("price_list") or []
+                        if isinstance(ladder, list):
+                            for lb in ladder:
+                                if isinstance(lb, dict):
+                                    qty = lb.get("purchases") or lb.get("qty") or lb.get("num")
+                                    p = lb.get("price_cn") or lb.get("price") or lb.get("unit_price")
+                                    if qty and p:
+                                        price_breaks.append({"quantity": qty, "unit_price": p})
+                            if not price and price_breaks:
+                                price = price_breaks[0]["unit_price"]
                         return self.success_result(mpn, {
                             "mpn": goods_name or mpn,
-                            "brand": item.get("brand_name"),
-                            "stock": item.get("stock") or item.get("goods_number"),
-                            "price_unit": item.get("price") or item.get("single_price"),
+                            "brand": item.get("brand_name") or item.get("brand"),
+                            "stock": item.get("stock") or item.get("goods_number") or item.get("number"),
+                            "price_unit": price,
+                            "price_breaks": price_breaks,
                             "package": item.get("encap") or item.get("package"),
                             "product_url": f"https://www.ichunt.com/s/?k={mpn}",
                         })

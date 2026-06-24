@@ -10,12 +10,12 @@ Docs: https://partner.element14.com/docs
 
 from __future__ import annotations
 
-import os
 import logging
 from typing import Any
 
 from src.adapters.base import HttpAdapter
 from src.adapters.registry import AdapterRegistry
+from src.config import get
 from src.models import PartResult
 
 logger = logging.getLogger(__name__)
@@ -29,8 +29,8 @@ class Element14Adapter(HttpAdapter):
 
     def __init__(self) -> None:
         super().__init__("element14", timeout=20.0, min_interval=0.5)
-        self._api_key = os.environ.get("ELEMENT14_API_KEY", "")
-        self._store = os.environ.get("ELEMENT14_STORE", "cn.element14.com")
+        self._api_key = get("element14.api_key")
+        self._store = get("element14.store") or "cn.element14.com"
 
     async def search_by_mpn(self, mpn: str) -> PartResult:
         if not self._api_key:

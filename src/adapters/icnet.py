@@ -10,6 +10,7 @@ from typing import Any
 
 from src.adapters.base import BrowserAdapter
 from src.adapters.registry import AdapterRegistry
+from src.config import get
 from src.core.browser_pool import BrowserPool
 from src.models import PartResult
 
@@ -34,14 +35,10 @@ class IcnetAdapter(BrowserAdapter):
     LOGIN_URL = "https://member.ic.net.cn/login.php"
     SEARCH_URL = "https://www.ic.net.cn/search.php"
 
-    # Default credentials from code/config.py
-    DEFAULT_USERNAME = "15165098292"
-    DEFAULT_PASSWORD = "Lxf861211_"
-
     def __init__(self, browser_pool: BrowserPool, username: str = "", password: str = "") -> None:
         super().__init__("IC交易网", browser_pool)
-        self._username = username or self.DEFAULT_USERNAME
-        self._password = password or self.DEFAULT_PASSWORD
+        self._username = username or get("icnet.username") or "15165098292"
+        self._password = password or get("icnet.password") or "Lxf861211_"
         self._logged_in = False
 
     async def search_by_mpn(self, mpn: str) -> PartResult:

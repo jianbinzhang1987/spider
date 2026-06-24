@@ -9,12 +9,12 @@ Docs: https://api.mouser.com/api/docs/ui/index
 
 from __future__ import annotations
 
-import os
 import logging
 from typing import Any
 
 from src.adapters.base import HttpAdapter
 from src.adapters.registry import AdapterRegistry
+from src.config import get
 from src.models import PartResult
 
 logger = logging.getLogger(__name__)
@@ -28,7 +28,7 @@ class MouserAdapter(HttpAdapter):
 
     def __init__(self) -> None:
         super().__init__("Mouser", timeout=20.0, min_interval=0.5)
-        self._api_key = os.environ.get("MOUSER_API_KEY", "")
+        self._api_key = get("mouser.api_key")
 
     async def search_by_mpn(self, mpn: str) -> PartResult:
         if not self._api_key:

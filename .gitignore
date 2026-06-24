@@ -1,6 +1,12 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Config files with secrets (use config.example.yaml as template)
+config.yaml
+config.local.yaml
+config.yml
+config.local.yml
 code/sessions/
 sessions/
 progress_cache.json
