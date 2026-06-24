@@ -95,52 +95,101 @@ class IchuntAdapter(BrowserAdapter):
         Structure: {error_code: 0, data: [{coupon_id, data: [product, ...]}]}
         """
         mpn_norm = self._normalize_text(mpn)
+        best_match = None
+        best_price = None
 
         for resp in responses:
             data_groups = resp.get("data", [])
             if not isinstance(data_groups, list):
-                continue
+                # Some responses have data as a dict
+                if isinstance(data_groups, dict):
+                    data_groups = [data_groups]
+                else:
+                    continue
 
             for group in data_groups:
                 if not isinstance(group, dict):
                     continue
                 items = group.get("data", [])
                 if not isinstance(items, list):
-                    continue
+                    # Try items directly from group
+                    items = group.get("list") or group.get("items") or []
+                    if not isinstance(items, list):
+                        continue
 
                 for item in items:
                     if not isinstance(item, dict):
                         continue
-                    goods_name = item.get("goods_name", "")
-                    if mpn_norm in self._normalize_text(goods_name):
-                        # Price: try multiple field names
-                        price = (
-                            item.get("price") or item.get("single_price")
-                            or item.get("goods_price") or item.get("cn_price")
-                            or item.get("unit_price") or item.get("sell_price")
-                            or item.get("min_price")
-                        )
-                        # Try ladder/price list
-                        price_breaks = []
-                        ladder = item.get("ladder_price") or item.get("prices") or item.get("price_list") or []
-                        if isinstance(ladder, list):
-                            for lb in ladder:
-                                if isinstance(lb, dict):
-                                    qty = lb.get("purchases") or lb.get("qty") or lb.get("num")
-                                    p = lb.get("price_cn") or lb.get("price") or lb.get("unit_price")
-                                    if qty and p:
-                                        price_breaks.append({"quantity": qty, "unit_price": p})
-                            if not price and price_breaks:
-                                price = price_breaks[0]["unit_price"]
-                        return self.success_result(mpn, {
-                            "mpn": goods_name or mpn,
-                            "brand": item.get("brand_name") or item.get("brand"),
-                            "stock": item.get("stock") or item.get("goods_number") or item.get("number"),
-                            "price_unit": price,
-                            "price_breaks": price_breaks,
-                            "package": item.get("encap") or item.get("package"),
-                            "product_url": f"https://www.ichunt.com/s/?k={mpn}",
-                        })
+                    goods_name = item.get("goods_name") or item.get("goods_sn") or ""
+                    if mpn_norm not in self._normalize_text(goods_name):
+                        continue
+
+                    # Price: try multiple field names (expanded)
+                    price = None
+                    for field in ("price", "single_price", "goods_price", "cn_price",
+                                  "unit_price", "sell_price", "min_price",
+                                  "price_cn", "cny_price", "rmb_price"):
+                        val = item.get(field)
+                        if val:
+                            try:
+                                p = float(val)
+                                if 0.0001 < p < 100000:
+                                    price = p
+                                    break
+                            except (ValueError, TypeError):
+                                pass
+
+                    # Try ladder/price list
+                    price_breaks = []
+                    ladder = (item.get("ladder_price") or item.get("prices")
+                              or item.get("price_list") or item.get("price_breaks") or [])
+                    if isinstance(ladder, list):
+                        for lb in ladder:
+                            if isinstance(lb, dict):
+                                qty = lb.get("purchases") or lb.get("qty") or lb.get("num") or lb.get("quantity")
+                                p = lb.get("price_cn") or lb.get("price") or lb.get("unit_price") or lb.get("cny_price")
+                                if qty and p:
+                                    try:
+                                        price_breaks.append({"quantity": int(qty), "unit_price": float(p)})
+                                    except (ValueError, TypeError):
+                                        pass
+                        if not price and price_breaks:
+                            price = price_breaks[0]["unit_price"]
+
+                    # Also try nested "offer" or "supplier" structures
+                    if not price:
+                        for nested_key in ("offer", "supplier_info", "goods_info"):
+                            nested = item.get(nested_key)
+                            if isinstance(nested, dict):
+                                for field in ("price", "cn_price", "unit_price", "sell_price"):
+                                    val = nested.get(field)
+                                    if val:
+                                        try:
+                                            p = float(val)
+                                            if 0.0001 < p < 100000:
+                                                price = p
+                                                break
+                                        except (ValueError, TypeError):
+                                            pass
+                                if price:
+                                    break
+
+                    # Track best match (prefer one with price)
+                    if best_match is None or (price and best_price is None):
+                        best_match = item
+                        best_price = price
+                        best_match["_price_breaks"] = price_breaks
+
+        if best_match:
+            return self.success_result(mpn, {
+                "mpn": best_match.get("goods_name") or best_match.get("goods_sn") or mpn,
+                "brand": best_match.get("brand_name") or best_match.get("brand"),
+                "stock": best_match.get("stock") or best_match.get("goods_number") or best_match.get("number"),
+                "price_unit": best_price,
+                "price_breaks": best_match.get("_price_breaks", []),
+                "package": best_match.get("encap") or best_match.get("package"),
+                "product_url": f"https://www.ichunt.com/s/?k={mpn}",
+            })
 
         return self.not_found_result(mpn)
 
@@ -151,8 +200,19 @@ class IchuntAdapter(BrowserAdapter):
         if mpn_norm not in self._normalize_text(html):
             return self.not_found_result(mpn)
 
+        price_values: list[float] = []
+
+        # Pattern 1: Currency symbol followed by number
         prices = re.findall(r'[￥¥]\s*(\d+\.?\d*)', html)
-        price_values = [float(p) for p in prices if 0.001 < float(p) < 100000]
+        price_values.extend(float(p) for p in prices if 0.001 < float(p) < 100000)
+
+        # Pattern 2: Price in JSON/data attributes
+        data_prices = re.findall(r'"(?:price|goods_price|single_price|cn_price|unit_price)"[:\s]*["\']?(\d+\.?\d*)', html)
+        price_values.extend(float(p) for p in data_prices if 0.001 < float(p) < 100000)
+
+        # Pattern 3: Ladder price text (e.g., "1+ ¥0.05")
+        ladder_prices = re.findall(r'\d+\+\s*[￥¥]?\s*(\d+\.?\d+)', html)
+        price_values.extend(float(p) for p in ladder_prices if 0.001 < float(p) < 100000)
 
         result_data: dict[str, Any] = {
             "mpn": mpn,
