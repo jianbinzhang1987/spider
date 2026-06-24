@@ -1,0 +1,39 @@
+# 元器件比价系统 — API 配置文件
+# 复制为 config.yaml 或 config.local.yaml 后填入实际密钥
+# config.local.yaml 优先级高于 config.yaml，且已加入 .gitignore
+
+# Digi-Key — OAuth2 认证 (https://developer.digikey.com)
+digikey:
+  client_id: ""
+  client_secret: ""
+
+# Mouser — API Key (https://www.mouser.com/api-hub/)
+mouser:
+  api_key: ""
+
+# element14/Farnell — API Key (https://partner.element14.com)
+element14:
+  api_key: ""
+  store: "cn.element14.com"  # 可选: cn.element14.com, sg.element14.com, etc.
+
+# 立创商城 LCSC — 签名认证 (https://www.lcsc.com/docs/openapi)
+lcsc:
+  api_key: ""
+  api_secret: ""
+
+# 云汉芯城 — 数据API (https://www.ickey.cn/api)
+ickey:
+  api_key: ""
+  api_secret: ""
+
+# IC交易网 — 登录凭据
+icnet:
+  username: "15165098292"
+  password: "Lxf861211_"
+
+# 系统设置
+system:
+  max_concurrent: 5        # 最大并发数
+  browser_pages: 3         # 浏览器最大页面数
+  request_timeout: 20      # HTTP 请求超时(秒)
+  exchange_rate: ""        # 固定汇率(留空则自动获取)

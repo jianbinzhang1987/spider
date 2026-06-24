@@ -32,7 +32,7 @@ class AllchipsAdapter(BrowserAdapter):
     """硬之城 adapter — Playwright + ddddocr slider captcha solving."""
 
     SEARCH_URL = "https://www.allchips.com/search"
-    MAX_CAPTCHA_RETRIES = 5
+    MAX_CAPTCHA_RETRIES = 8
 
     def __init__(self, browser_pool: BrowserPool) -> None:
         super().__init__("硬之城", browser_pool)
@@ -42,8 +42,8 @@ class AllchipsAdapter(BrowserAdapter):
         page = await self._new_page()
         try:
             url = f"{self.SEARCH_URL}?keyword={mpn}"
-            await page.goto(url, timeout=25000)
-            await page.wait_for_timeout(5000)
+            await page.goto(url, timeout=30000)
+            await page.wait_for_timeout(6000)
 
             content = await page.content()
 
@@ -52,16 +52,16 @@ class AllchipsAdapter(BrowserAdapter):
                 if not solved:
                     return self.failed_result(mpn, "验证码未通过(云之锁)")
                 # Captcha JS does location.reload() after solve — wait for it
-                await page.wait_for_timeout(3000)
+                await page.wait_for_timeout(4000)
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=10000)
+                    await page.wait_for_load_state("networkidle", timeout=15000)
                 except Exception:
                     pass
                 content = await page.content()
-                # If still captcha, try one manual reload
+                # If still captcha, try navigating back to search URL
                 if self._has_captcha(content) and len(content) < 10000:
-                    await page.goto(url, timeout=25000)
-                    await page.wait_for_timeout(5000)
+                    await page.goto(url, timeout=30000)
+                    await page.wait_for_timeout(6000)
                     content = await page.content()
                     if self._has_captcha(content) and len(content) < 10000:
                         return self.failed_result(mpn, "验证码通过但cookie未持久化")
@@ -81,20 +81,29 @@ class AllchipsAdapter(BrowserAdapter):
 
     async def _solve_with_retries(self, page, mpn: str) -> bool:
         """Trigger captcha panel and attempt solving with retries."""
-        # Trigger the captcha overlay
-        has_showcap = await page.evaluate('typeof showCap === "function"')
-        if has_showcap:
-            await page.evaluate("showCap()")
-            await page.wait_for_timeout(4000)
-        else:
-            logger.warning("[硬之城] showCap() not available")
-            return False
-
-        # Get initial captcha images
+        # Check if captcha is already visible (auto-triggered)
         images = await self._get_captcha_images(page)
         if not images:
-            logger.warning("[硬之城] Captcha images not available")
-            return False
+            # Try triggering with showCap()
+            has_showcap = await page.evaluate('typeof showCap === "function"')
+            if has_showcap:
+                await page.evaluate("showCap()")
+                await page.wait_for_timeout(4000)
+            else:
+                # Try clicking the captcha button directly
+                cap_btn = await page.query_selector('.captchabutton, [class*="captcha"]')
+                if cap_btn:
+                    await cap_btn.click()
+                    await page.wait_for_timeout(4000)
+                else:
+                    logger.warning("[硬之城] showCap() not available and no captcha button")
+                    return False
+
+            # Get captcha images after trigger
+            images = await self._get_captcha_images(page)
+            if not images:
+                logger.warning("[硬之城] Captcha images not available after trigger")
+                return False
 
         bg_bytes, piece_bytes = images
 

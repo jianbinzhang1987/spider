@@ -133,21 +133,62 @@ class OneyacAdapter(HttpAdapter):
 
     def _parse_html_regex(self, mpn: str, html: str) -> PartResult:
         """Fallback: extract data via regex from HTML."""
-        # Extract prices
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "lxml")
+
+        # Extract prices — multiple patterns
+        price_values: list[float] = []
+
+        # Pattern 1: ¥/￥ followed by numbers
         prices = re.findall(r'[￥¥]\s*(\d+\.?\d*)', html)
-        price_values = [float(p) for p in prices if 0.0001 < float(p) < 100000]
+        price_values.extend(float(p) for p in prices if 0.0001 < float(p) < 100000)
+
+        # Pattern 2: class containing "price" with numeric content
+        for el in soup.select('[class*="price"], [class*="Price"]'):
+            text = el.get_text(strip=True)
+            nums = re.findall(r'(\d+\.?\d+)', text)
+            for n in nums:
+                v = float(n)
+                if 0.0001 < v < 100000:
+                    price_values.append(v)
+
+        # Pattern 3: data attributes containing price
+        for el in soup.select('[data-price], [data-min-price]'):
+            for attr in ("data-price", "data-min-price", "data-unit-price"):
+                val = el.get(attr)
+                if val:
+                    try:
+                        v = float(val)
+                        if 0.0001 < v < 100000:
+                            price_values.append(v)
+                    except (ValueError, TypeError):
+                        pass
 
         # Extract brand
         brand = None
-        brand_match = re.search(r'(?:品牌|brand)[：:\s]*([^<\s]{2,30})', html, re.I)
+        brand_match = re.search(r'(?:品牌|brand|厂商)[：:\s]*([^<\s]{2,30})', html, re.I)
         if brand_match:
             brand = brand_match.group(1)
+        if not brand:
+            for el in soup.select('[class*="brand"], [class*="Brand"], [class*="mfr"]'):
+                text = el.get_text(strip=True)
+                if text and 2 <= len(text) <= 30:
+                    brand = text
+                    break
 
         # Extract stock
         stock = None
-        stock_match = re.search(r'(?:库存|stock)[：:\s]*([\d,]+)', html, re.I)
+        stock_match = re.search(r'(?:库存|stock|现货)[：:\s]*([\d,]+)', html, re.I)
         if stock_match:
             stock = self._to_int(stock_match.group(1))
+        if not stock:
+            for el in soup.select('[class*="stock"], [class*="inventory"]'):
+                text = el.get_text(strip=True)
+                nums = re.findall(r'([\d,]+)', text)
+                if nums:
+                    stock = self._to_int(nums[0])
+                    break
 
         result_data: dict[str, Any] = {
             "mpn": mpn,

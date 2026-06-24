@@ -62,6 +62,11 @@ class IcgooAdapter(BrowserAdapter):
             if api_data.get("supplier"):
                 result = self._parse_supplier_api(mpn, api_data["supplier"], url)
                 if result.status.value == "success":
+                    # If no price from supplier API, try batch_price data
+                    if result.price_unit is None and api_data.get("price"):
+                        price = self._extract_batch_price(mpn, api_data["price"])
+                        if price is not None:
+                            result.price_unit = price
                     return result
 
             # Fallback: parse rendered DOM
@@ -79,7 +84,13 @@ class IcgooAdapter(BrowserAdapter):
             # The API returns supplier offers with pricing
             items = None
             if isinstance(data, dict):
-                items = data.get("data") or data.get("items") or data.get("list")
+                items = (
+                    data.get("data") or data.get("items") or data.get("list")
+                    or data.get("results") or data.get("products")
+                )
+                # Handle nested: {data: {list: [...]}}
+                if isinstance(items, dict):
+                    items = items.get("list") or items.get("items") or items.get("data")
             if isinstance(data, list):
                 items = data
 
@@ -91,18 +102,88 @@ class IcgooAdapter(BrowserAdapter):
             if not best or not isinstance(best, dict):
                 return self.not_found_result(mpn)
 
+            # Price extraction — try multiple field names
+            price = (
+                best.get("price") or best.get("unit_price") or best.get("unitPrice")
+                or best.get("min_price") or best.get("minPrice")
+                or best.get("cny_price") or best.get("sell_price")
+                or best.get("ladder_price")
+            )
+            # Try nested price_breaks/ladder
+            price_breaks = []
+            ladder = best.get("price_breaks") or best.get("ladder") or best.get("prices") or []
+            if isinstance(ladder, list):
+                for item in ladder:
+                    if isinstance(item, dict):
+                        qty = item.get("qty") or item.get("quantity") or item.get("num")
+                        p = item.get("price") or item.get("unit_price") or item.get("cny_price")
+                        if qty and p:
+                            price_breaks.append({"quantity": qty, "unit_price": p})
+                if not price and price_breaks:
+                    price = price_breaks[0]["unit_price"]
+
             return self.success_result(mpn, {
-                "mpn": best.get("partno") or best.get("mpn") or mpn,
-                "brand": best.get("mfr") or best.get("brand") or best.get("manufacturer"),
-                "stock": best.get("stock") or best.get("inventory"),
-                "price_unit": best.get("price") or best.get("unit_price"),
-                "moq": best.get("moq") or best.get("min_qty"),
+                "mpn": best.get("partno") or best.get("mpn") or best.get("goods_name") or mpn,
+                "brand": (
+                    best.get("mfr") or best.get("brand") or best.get("manufacturer")
+                    or best.get("brand_name")
+                ),
+                "stock": (
+                    best.get("stock") or best.get("inventory")
+                    or best.get("qty") or best.get("available")
+                ),
+                "price_unit": price,
+                "price_breaks": price_breaks,
+                "moq": best.get("moq") or best.get("min_qty") or best.get("mpq"),
                 "product_url": url,
                 "description": best.get("desc") or best.get("description"),
             })
         except Exception as e:
             logger.warning(f"[ICGOO] API parse error: {e}")
             return self.not_found_result(mpn)
+
+    def _extract_batch_price(self, mpn: str, data: Any) -> float | None:
+        """Extract price from batch_price API response."""
+        try:
+            items = data if isinstance(data, list) else (
+                data.get("data") or data.get("items") or data.get("list") or []
+            )
+            if isinstance(items, dict):
+                items = items.get("data") or items.get("list") or []
+            if not isinstance(items, list):
+                return None
+
+            mpn_norm = self._normalize_text(mpn)
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                item_mpn = item.get("partno") or item.get("mpn") or item.get("goods_name") or ""
+                if mpn_norm not in self._normalize_text(str(item_mpn)):
+                    continue
+                # Try all price fields
+                price = (
+                    item.get("price") or item.get("unit_price") or item.get("cny_price")
+                    or item.get("min_price") or item.get("sell_price")
+                )
+                if price:
+                    try:
+                        return float(price)
+                    except (ValueError, TypeError):
+                        pass
+                # Try ladder
+                ladder = item.get("ladder") or item.get("prices") or item.get("price_breaks") or []
+                if isinstance(ladder, list) and ladder:
+                    for lb in ladder:
+                        if isinstance(lb, dict):
+                            p = lb.get("price") or lb.get("unit_price") or lb.get("cny_price")
+                            if p:
+                                try:
+                                    return float(p)
+                                except (ValueError, TypeError):
+                                    pass
+        except Exception:
+            pass
+        return None
 
     def _parse_dom(self, mpn: str, html: str, url: str) -> PartResult:
         """Fallback: parse rendered DOM for product info."""

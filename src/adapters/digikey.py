@@ -9,13 +9,13 @@ Docs: https://developer.digikey.com/products/product-information-v4
 
 from __future__ import annotations
 
-import os
 import time
 import logging
 from typing import Any
 
 from src.adapters.base import HttpAdapter
 from src.adapters.registry import AdapterRegistry
+from src.config import get
 from src.models import PartResult
 
 logger = logging.getLogger(__name__)
@@ -30,8 +30,8 @@ class DigikeyAdapter(HttpAdapter):
 
     def __init__(self) -> None:
         super().__init__("Digi-Key", timeout=20.0, min_interval=0.5)
-        self._client_id = os.environ.get("DIGIKEY_CLIENT_ID", "")
-        self._client_secret = os.environ.get("DIGIKEY_CLIENT_SECRET", "")
+        self._client_id = get("digikey.client_id")
+        self._client_secret = get("digikey.client_secret")
         self._access_token: str | None = None
         self._token_expires_at: float = 0
 

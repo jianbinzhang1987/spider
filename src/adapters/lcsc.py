@@ -10,7 +10,6 @@ Docs: https://www.lcsc.com/docs/openapi/index.html
 from __future__ import annotations
 
 import hashlib
-import os
 import secrets
 import time
 import logging
@@ -18,6 +17,7 @@ from typing import Any
 
 from src.adapters.base import HttpAdapter
 from src.adapters.registry import AdapterRegistry
+from src.config import get
 from src.models import PartResult
 
 logger = logging.getLogger(__name__)
@@ -31,8 +31,8 @@ class LcscAdapter(HttpAdapter):
 
     def __init__(self) -> None:
         super().__init__("立创商城", timeout=20.0, min_interval=1.0)
-        self._api_key = os.environ.get("LCSC_API_KEY", "")
-        self._api_secret = os.environ.get("LCSC_API_SECRET", "")
+        self._api_key = get("lcsc.api_key")
+        self._api_secret = get("lcsc.api_secret")
 
     def _generate_signature(self) -> dict[str, str]:
         """Generate authentication parameters: key, nonce, timestamp, signature."""

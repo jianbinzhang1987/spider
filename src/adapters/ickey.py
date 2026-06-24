@@ -9,12 +9,12 @@ Alternative: Use the HTTP search page directly (curl_cffi fallback).
 
 from __future__ import annotations
 
-import os
 import logging
 from typing import Any
 
 from src.adapters.base import HttpAdapter
 from src.adapters.registry import AdapterRegistry
+from src.config import get
 from src.models import PartResult
 
 logger = logging.getLogger(__name__)
@@ -33,8 +33,8 @@ class IckeyAdapter(HttpAdapter):
 
     def __init__(self) -> None:
         super().__init__("云汉芯城", timeout=20.0, min_interval=1.0)
-        self._api_key = os.environ.get("ICKEY_API_KEY", "")
-        self._api_secret = os.environ.get("ICKEY_API_SECRET", "")
+        self._api_key = get("ickey.api_key")
+        self._api_secret = get("ickey.api_secret")
 
     async def search_by_mpn(self, mpn: str) -> PartResult:
         if self._api_key and self._api_secret:
