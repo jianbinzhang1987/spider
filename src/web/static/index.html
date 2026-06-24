@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>元器件比价系统</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f0f2f5;
+            min-height: 100vh;
+            padding: 40px 20px;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        h1 {
+            text-align: center;
+            color: #1a1a2e;
+            margin-bottom: 8px;
+            font-size: 28px;
+        }
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 40px;
+            font-size: 14px;
+        }
+        .card {
+            background: #fff;
+            border-radius: 12px;
+            padding: 32px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+            margin-bottom: 24px;
+        }
+        .upload-zone {
+            border: 2px dashed #d9d9d9;
+            border-radius: 8px;
+            padding: 48px 24px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.3s, background 0.3s;
+        }
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: #1890ff;
+            background: #e6f7ff;
+        }
+        .upload-zone .icon {
+            font-size: 48px;
+            color: #1890ff;
+            margin-bottom: 16px;
+        }
+        .upload-zone p {
+            color: #666;
+            margin-bottom: 8px;
+        }
+        .upload-zone .hint {
+            font-size: 12px;
+            color: #999;
+        }
+        input[type="file"] { display: none; }
+        .file-info {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            background: #f6ffed;
+            border: 1px solid #b7eb8f;
+            border-radius: 6px;
+            margin-top: 16px;
+        }
+        .file-info .name { color: #52c41a; font-weight: 500; }
+        .file-info .remove { color: #ff4d4f; cursor: pointer; }
+        .btn {
+            display: inline-block;
+            padding: 12px 32px;
+            background: #1890ff;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background 0.3s;
+            margin-top: 24px;
+            width: 100%;
+        }
+        .btn:hover { background: #40a9ff; }
+        .btn:disabled { background: #d9d9d9; cursor: not-allowed; }
+        .btn-download {
+            background: #52c41a;
+        }
+        .btn-download:hover { background: #73d13d; }
+        .progress-section { display: none; }
+        .progress-section.active { display: block; }
+        .progress-bar-container {
+            height: 8px;
+            background: #f0f0f0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 16px 0;
+        }
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #1890ff, #52c41a);
+            border-radius: 4px;
+            transition: width 0.3s;
+            width: 0%;
+        }
+        .progress-text {
+            display: flex;
+            justify-content: space-between;
+            color: #666;
+            font-size: 14px;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .status-running { background: #e6f7ff; color: #1890ff; }
+        .status-completed { background: #f6ffed; color: #52c41a; }
+        .status-failed { background: #fff2f0; color: #ff4d4f; }
+        .adapter-select {
+            margin-top: 16px;
+        }
+        .adapter-select summary {
+            cursor: pointer;
+            color: #1890ff;
+            font-size: 14px;
+        }
+        .adapter-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 8px;
+            margin-top: 12px;
+        }
+        .adapter-grid label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 13px;
+            color: #333;
+            padding: 6px 8px;
+            border: 1px solid #eee;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .adapter-grid label:hover {
+            background: #f0f7ff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>元器件比价系统</h1>
+        <p class="subtitle">上传Excel文件，自动在多个平台查询价格、库存、货期</p>
+
+        <div class="card">
+            <div class="upload-zone" id="uploadZone">
+                <div class="icon">📄</div>
+                <p>点击或拖拽上传 Excel 文件</p>
+                <p class="hint">支持 .xlsx / .xls 格式，需包含"型号"列</p>
+            </div>
+            <input type="file" id="fileInput" accept=".xlsx,.xls">
+            <div class="file-info" id="fileInfo" style="display:none">
+                <span class="name" id="fileName"></span>
+                <span class="remove" id="removeFile">✕ 移除</span>
+            </div>
+
+            <details class="adapter-select">
+                <summary>选择查询平台（默认全选）</summary>
+                <div class="adapter-grid" id="adapterGrid"></div>
+            </details>
+
+            <button class="btn" id="submitBtn" disabled>开始查询</button>
+        </div>
+
+        <div class="card progress-section" id="progressSection">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
+                <h3>查询进度</h3>
+                <span class="status-badge status-running" id="statusBadge">进行中</span>
+            </div>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+            <div class="progress-text">
+                <span id="progressDetail">准备中...</span>
+                <span id="progressPct">0%</span>
+            </div>
+            <button class="btn btn-download" id="downloadBtn" style="display:none">下载比价结果 Excel</button>
+        </div>
+    </div>
+
+    <script>
+        const uploadZone = document.getElementById('uploadZone');
+        const fileInput = document.getElementById('fileInput');
+        const fileInfo = document.getElementById('fileInfo');
+        const fileName = document.getElementById('fileName');
+        const removeFile = document.getElementById('removeFile');
+        const submitBtn = document.getElementById('submitBtn');
+        const progressSection = document.getElementById('progressSection');
+        const progressBar = document.getElementById('progressBar');
+        const progressDetail = document.getElementById('progressDetail');
+        const progressPct = document.getElementById('progressPct');
+        const statusBadge = document.getElementById('statusBadge');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const adapterGrid = document.getElementById('adapterGrid');
+
+        let selectedFile = null;
+        let pollTimer = null;
+
+        // Load adapters
+        fetch('/api/adapters').then(r => r.json()).then(data => {
+            const adapters = data.adapters || [];
+            adapterGrid.innerHTML = adapters.map(name =>
+                `<label><input type="checkbox" value="${name}" checked> ${name}</label>`
+            ).join('');
+        });
+
+        // Upload zone events
+        uploadZone.addEventListener('click', () => fileInput.click());
+        uploadZone.addEventListener('dragover', e => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+        uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+        uploadZone.addEventListener('drop', e => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+        });
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files.length) handleFile(fileInput.files[0]);
+        });
+
+        function handleFile(file) {
+            if (!file.name.match(/\.xlsx?$/i)) {
+                alert('请上传 .xlsx 或 .xls 格式的文件');
+                return;
+            }
+            selectedFile = file;
+            fileName.textContent = file.name;
+            fileInfo.style.display = 'flex';
+            uploadZone.style.display = 'none';
+            submitBtn.disabled = false;
+        }
+
+        removeFile.addEventListener('click', () => {
+            selectedFile = null;
+            fileInfo.style.display = 'none';
+            uploadZone.style.display = 'block';
+            submitBtn.disabled = true;
+            fileInput.value = '';
+        });
+
+        // Submit
+        submitBtn.addEventListener('click', async () => {
+            if (!selectedFile) return;
+            submitBtn.disabled = true;
+            submitBtn.textContent = '上传中...';
+
+            const checkedAdapters = Array.from(
+                adapterGrid.querySelectorAll('input:checked')
+            ).map(cb => cb.value);
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+
+            const adaptersParam = checkedAdapters.join(',');
+            const url = `/api/upload${adaptersParam ? '?adapters=' + encodeURIComponent(adaptersParam) : ''}`;
+
+            try {
+                const resp = await fetch(url, { method: 'POST', body: formData });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    alert(data.detail || '上传失败');
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = '开始查询';
+                    return;
+                }
+
+                progressSection.classList.add('active');
+                submitBtn.textContent = '查询中...';
+                startPolling(data.task_id);
+            } catch (e) {
+                alert('网络错误: ' + e.message);
+                submitBtn.disabled = false;
+                submitBtn.textContent = '开始查询';
+            }
+        });
+
+        function startPolling(taskId) {
+            pollTimer = setInterval(async () => {
+                try {
+                    const resp = await fetch(`/api/task/${taskId}/status`);
+                    const data = await resp.json();
+                    updateProgress(data, taskId);
+                } catch (e) {
+                    console.error('Poll error:', e);
+                }
+            }, 2000);
+        }
+
+        function updateProgress(data, taskId) {
+            progressBar.style.width = data.progress_pct + '%';
+            progressPct.textContent = data.progress_pct + '%';
+            progressDetail.textContent = `${data.completed_items}/${data.total_items} 型号完成 | 当前: ${data.current_item || '...'}`;
+
+            if (data.status === 'completed') {
+                clearInterval(pollTimer);
+                statusBadge.className = 'status-badge status-completed';
+                statusBadge.textContent = '已完成';
+                progressBar.style.width = '100%';
+                progressPct.textContent = '100%';
+                downloadBtn.style.display = 'block';
+                downloadBtn.onclick = () => {
+                    window.location.href = `/api/task/${taskId}/download`;
+                };
+                submitBtn.textContent = '开始查询';
+                submitBtn.disabled = false;
+            } else if (data.status === 'failed') {
+                clearInterval(pollTimer);
+                statusBadge.className = 'status-badge status-failed';
+                statusBadge.textContent = '失败';
+                submitBtn.textContent = '重新查询';
+                submitBtn.disabled = false;
+            }
+        }
+    </script>
+</body>
+</html>
