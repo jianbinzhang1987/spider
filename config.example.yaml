@@ -4,12 +4,12 @@
 
 # Digi-Key — OAuth2 认证 (https://developer.digikey.com)
 digikey:
-  client_id: ""
-  client_secret: ""
+  client_id: "TpovddPi0AOikKGoHneb1yHQ0fdGlkgu2hlczLbvBAq1XGWN"
+  client_secret: "J0cC381V6M7CAAgZGyL45KcO28jRTO7es4XO4vAyoWIulGHawPgkmIuvMES9n2cP"
 
 # Mouser — API Key (https://www.mouser.com/api-hub/)
 mouser:
-  api_key: ""
+  api_key: "27c6324f-596c-47bc-84f3-25355e539de5"
 
 # element14/Farnell — API Key (https://partner.element14.com)
 element14:
