@@ -44,6 +44,7 @@ class PartResult:
     stock: int | None = None
     moq: int | None = None
     price_unit: float | None = None
+    price_currency: str = "CNY"  # "CNY" or "USD"
     price_breaks: list[PriceBreak] = field(default_factory=list)
     lead_time: str | None = None
     product_url: str | None = None

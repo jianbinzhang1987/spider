@@ -51,6 +51,7 @@ class BaseAdapter(ABC):
             stock=self._to_int(raw_data.get("stock")),
             moq=self._to_int(raw_data.get("moq")),
             price_unit=self._to_float(raw_data.get("price_unit")),
+            price_currency=raw_data.get("price_currency", "CNY"),
             price_breaks=price_breaks,
             lead_time=raw_data.get("lead_time"),
             product_url=raw_data.get("product_url"),
