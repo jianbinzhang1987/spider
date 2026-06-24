@@ -68,6 +68,11 @@ class IcdealAdapter(BrowserAdapter):
                     if self._is_waf_page(current_url, content):
                         return self.failed_result(mpn, "WAF滑块验证后再次触发验证")
 
+            body_text = await page.locator("body").inner_text(timeout=5000)
+            text_result = self._parse_text_results(mpn, body_text, current_url)
+            if text_result.status.value != "not_found":
+                return text_result
+
             return self._parse_results(mpn, content, current_url)
         except Exception as e:
             logger.error(f"[百能云芯] search failed: {e}")
@@ -81,13 +86,84 @@ class IcdealAdapter(BrowserAdapter):
             "waf.icdeal.com/waf/verification",
             "正在验证您的身份",
             "滑动验证码",
-            "showCap",
-            "captcha",
             "访问受限",
             "Access Denied",
         ]
         target = f"{url}\n{html}"
         return any(signal in target for signal in waf_signals)
+
+    def _parse_text_results(self, mpn: str, text: str, url: str) -> PartResult:
+        """Parse icdeal rendered result text by product card blocks."""
+        mpn_norm = self._normalize_text(mpn)
+        if mpn_norm not in self._normalize_text(text):
+            return self.not_found_result(mpn)
+
+        blocks = []
+        marker = f"数据手册\n{mpn}"
+        for chunk in text.split(marker)[1:]:
+            block = f"{mpn}{chunk.split('官方客服电话', 1)[0]}"
+            if "品牌：" in block and "库存：" in block:
+                blocks.append(block)
+
+        if not blocks:
+            return self.not_found_result(mpn)
+
+        parsed = [self._parse_product_block(mpn, block) for block in blocks]
+        parsed = [item for item in parsed if item]
+        if not parsed:
+            return self.not_found_result(mpn)
+
+        best = sorted(
+            parsed,
+            key=lambda item: (
+                item.get("price_unit") is None,
+                item.get("price_unit") or 10**12,
+            ),
+        )[0]
+        best["product_url"] = url
+        return self.success_result(mpn, best)
+
+    def _parse_product_block(self, mpn: str, block: str) -> dict | None:
+        brand = self._match_label(block, "品牌")
+        package = self._match_label(block, "封装")
+        stock = self._match_label(block, "库存")
+        moq = self._match_label(block, "标准包")
+        lead_time = None
+        lead_time_match = re.search(r"大陆[:：]\s*([^\n]+)", block)
+        if lead_time_match:
+            lead_time = lead_time_match.group(1).strip()
+
+        prices = [
+            float(price)
+            for price in re.findall(r"¥\s*(\d+\.?\d*)", block)
+            if 0.0001 < float(price) < 100000
+        ]
+        if not prices and not brand:
+            return None
+
+        price_breaks = []
+        for qty, price in re.findall(r"(\d+)\+\s*(?:\n+\s*--)?\s*\n+\s*¥\s*(\d+\.?\d*)", block):
+            qty_int = self._to_int(qty)
+            price_float = self._to_float(price)
+            if qty_int is not None and price_float is not None:
+                price_breaks.append({"quantity": qty_int, "unit_price": price_float})
+
+        return {
+            "mpn": mpn,
+            "brand": brand,
+            "package": package,
+            "stock": stock,
+            "moq": moq,
+            "price_unit": min(prices) if prices else None,
+            "price_breaks": price_breaks,
+            "lead_time": lead_time,
+        }
+
+    def _match_label(self, text: str, label: str) -> str | None:
+        match = re.search(rf"{label}：\s*\n\s*([^\n]+)", text)
+        if not match:
+            return None
+        return match.group(1).strip()
 
     async def _wait_for_manual_verification(self, page, target_url: str) -> bool:
         """Wait for the user to complete the visible WAF slider challenge."""

@@ -135,7 +135,7 @@ async def main():
     # Output JSON
     output = [r.to_dict() for r in results]
     output_file = Path("search_results.json")
-    output_file.write_text(json.dumps(output, ensure_ascii=False, indent=2))
+    output_file.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info(f"Results saved to {output_file}")
 
 
