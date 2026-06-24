@@ -35,35 +35,49 @@ class IchuntAdapter(BrowserAdapter):
 
             async def capture_api(response):
                 url = response.url
-                if "api.ichunt.com" in url or "apibom.ichunt.com" in url:
+                if any(d in url for d in [
+                    "api.ichunt.com", "apibom.ichunt.com",
+                    "search", "goods", "product"
+                ]):
                     try:
-                        text = await response.text()
-                        if text and (text.startswith("{") or text.startswith("[")):
-                            api_responses.append({
-                                "url": url,
-                                "data": json.loads(text),
-                            })
+                        ct = response.headers.get("content-type", "")
+                        if "json" in ct or "javascript" in ct:
+                            text = await response.text()
+                            if text and (text.startswith("{") or text.startswith("[")):
+                                api_responses.append({
+                                    "url": url,
+                                    "data": json.loads(text),
+                                })
                     except Exception:
                         pass
 
             page.on("response", capture_api)
 
-            # Load homepage
-            await page.goto("https://www.ichunt.com/", timeout=20000)
-            await page.wait_for_timeout(3000)
+            # Try direct search URL first (faster than homepage interaction)
+            search_urls = [
+                f"https://www.ichunt.com/search?keyword={mpn}",
+                f"https://www.ichunt.com/search/{mpn}.html",
+            ]
 
-            # Try to find search input and submit
-            search_input = await page.query_selector(
-                'input[type="text"], input.search-input, [placeholder*="搜索"]'
-            )
-            if search_input:
-                await search_input.fill(mpn)
-                await search_input.press("Enter")
-                await page.wait_for_timeout(8000)
-            else:
-                # Try direct URL navigation
-                await page.goto(f"https://www.ichunt.com/search?keyword={mpn}", timeout=20000)
-                await page.wait_for_timeout(8000)
+            for search_url in search_urls:
+                try:
+                    await page.goto(search_url, timeout=20000)
+                    await page.wait_for_timeout(8000)
+                    if "ichunt.com" in page.url:
+                        break
+                except Exception:
+                    continue
+
+            # If no results from URL, try interactive search
+            if not api_responses:
+                search_input = await page.query_selector(
+                    'input[type="text"], input.search-input, [placeholder*="搜索"], '
+                    '[placeholder*="型号"], input[name="keyword"]'
+                )
+                if search_input:
+                    await search_input.fill(mpn)
+                    await search_input.press("Enter")
+                    await page.wait_for_timeout(8000)
 
             # Check intercepted API data
             if api_responses:
