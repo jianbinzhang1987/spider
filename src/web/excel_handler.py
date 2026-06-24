@@ -2,7 +2,8 @@
 
 Input Excel columns: 型号, 品牌, 数量(采购数量)
 Output Excel columns: 型号, 品牌, 采购数量, 适用价格(人民币), 库存数量,
-                      货期, 来源网站, 渠道链接, 原始币种价格, 查询时间, 最低价
+                      货期, 来源网站, 渠道链接, 原始币种价格, 查询时间,
+                      最低价, 状态, 错误信息
 """
 
 from __future__ import annotations
@@ -79,7 +80,7 @@ def generate_result_excel(results: list[SearchResultRow], output_path: Path) -> 
     """Generate the output Excel with all search results.
 
     Columns: 型号, 品牌, 采购数量, 适用价格(人民币), 库存数量,
-             货期, 来源网站, 渠道链接, 原始币种价格, 查询时间, 最低价
+             货期, 来源网站, 渠道链接, 原始币种价格, 查询时间, 最低价, 状态, 错误信息
     """
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
@@ -91,7 +92,7 @@ def generate_result_excel(results: list[SearchResultRow], output_path: Path) -> 
     # Header
     headers = [
         "型号", "品牌", "采购数量", "适用价格(人民币)", "库存数量",
-        "货期", "来源网站", "渠道链接", "原始币种价格", "查询时间", "最低价", "状态"
+        "货期", "来源网站", "渠道链接", "原始币种价格", "查询时间", "最低价", "状态", "错误信息"
     ]
     header_font = Font(bold=True)
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -119,6 +120,7 @@ def generate_result_excel(results: list[SearchResultRow], output_path: Path) -> 
         ws.cell(row=row_idx, column=10, value=result.query_time)
         ws.cell(row=row_idx, column=11, value="⭐" if result.is_best_price else "")
         ws.cell(row=row_idx, column=12, value=result.status)
+        ws.cell(row=row_idx, column=13, value=result.error)
 
         # Highlight best price row
         if result.is_best_price:

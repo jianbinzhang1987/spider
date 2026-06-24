@@ -126,18 +126,16 @@ class IchuntAdapter(BrowserAdapter):
 
                     # Price: try multiple field names (expanded)
                     price = None
-                    for field in ("price", "single_price", "goods_price", "cn_price",
+                    for field in ("price_cn", "cny_price", "rmb_price", "price",
+                                  "single_price", "goods_price", "cn_price",
                                   "unit_price", "sell_price", "min_price",
-                                  "price_cn", "cny_price", "rmb_price"):
+                                  "database_price"):
                         val = item.get(field)
                         if val:
-                            try:
-                                p = float(val)
-                                if 0.0001 < p < 100000:
-                                    price = p
-                                    break
-                            except (ValueError, TypeError):
-                                pass
+                            p = self._to_float(val)
+                            if p and 0.0001 < p < 100000:
+                                price = p
+                                break
 
                     # Try ladder/price list
                     price_breaks = []
@@ -146,13 +144,23 @@ class IchuntAdapter(BrowserAdapter):
                     if isinstance(ladder, list):
                         for lb in ladder:
                             if isinstance(lb, dict):
-                                qty = lb.get("purchases") or lb.get("qty") or lb.get("num") or lb.get("quantity")
-                                p = lb.get("price_cn") or lb.get("price") or lb.get("unit_price") or lb.get("cny_price")
-                                if qty and p:
-                                    try:
-                                        price_breaks.append({"quantity": int(qty), "unit_price": float(p)})
-                                    except (ValueError, TypeError):
-                                        pass
+                                qty = (
+                                    self._to_int(lb.get("purchases"))
+                                    or self._to_int(lb.get("qty"))
+                                    or self._to_int(lb.get("num"))
+                                    or self._to_int(lb.get("quantity"))
+                                    or self._to_int(item.get("moq_origin"))
+                                    or 1
+                                )
+                                p = (
+                                    self._to_float(lb.get("price_cn"))
+                                    or self._to_float(lb.get("cny_price"))
+                                    or self._to_float(lb.get("price"))
+                                    or self._to_float(lb.get("unit_price"))
+                                    or self._to_float(lb.get("price_us"))
+                                )
+                                if p and 0.0001 < p < 100000:
+                                    price_breaks.append({"quantity": qty, "unit_price": p})
                         if not price and price_breaks:
                             price = price_breaks[0]["unit_price"]
 
@@ -164,13 +172,10 @@ class IchuntAdapter(BrowserAdapter):
                                 for field in ("price", "cn_price", "unit_price", "sell_price"):
                                     val = nested.get(field)
                                     if val:
-                                        try:
-                                            p = float(val)
-                                            if 0.0001 < p < 100000:
-                                                price = p
-                                                break
-                                        except (ValueError, TypeError):
-                                            pass
+                                        p = self._to_float(val)
+                                        if p and 0.0001 < p < 100000:
+                                            price = p
+                                            break
                                 if price:
                                     break
 
@@ -180,7 +185,7 @@ class IchuntAdapter(BrowserAdapter):
                         best_price = price
                         best_match["_price_breaks"] = price_breaks
 
-        if best_match:
+        if best_match and best_price:
             return self.success_result(mpn, {
                 "mpn": best_match.get("goods_name") or best_match.get("goods_sn") or mpn,
                 "brand": best_match.get("brand_name") or best_match.get("brand"),
@@ -190,6 +195,9 @@ class IchuntAdapter(BrowserAdapter):
                 "package": best_match.get("encap") or best_match.get("package"),
                 "product_url": f"https://www.ichunt.com/s/?k={mpn}",
             })
+
+        if best_match:
+            return self.failed_result(mpn, "找到型号但未获取到报价")
 
         return self.not_found_result(mpn)
 
@@ -221,5 +229,7 @@ class IchuntAdapter(BrowserAdapter):
 
         if price_values:
             result_data["price_unit"] = min(price_values)
+        else:
+            return self.failed_result(mpn, "找到型号但未获取到报价")
 
         return self.success_result(mpn, result_data)

@@ -87,7 +87,7 @@ class IcgooAdapter(BrowserAdapter):
                         dom_price = self._extract_price_from_dom(content)
                         if dom_price is not None:
                             result.price_unit = dom_price
-                    return result
+                    return self._require_price(mpn, result)
 
             # Fallback: parse rendered DOM (try clicking into first product if available)
             content = await page.content()
@@ -105,12 +105,17 @@ class IcgooAdapter(BrowserAdapter):
                         result.price_unit = detail_price
                         result.product_url = detail_url
 
-            return result
+            return self._require_price(mpn, result)
         except Exception as e:
             logger.error(f"[ICGOO] search failed: {e}")
             return self.failed_result(mpn, str(e))
         finally:
             await self._release_page(page)
+
+    def _require_price(self, mpn: str, result: PartResult) -> PartResult:
+        if result.status.value == "success" and result.price_unit is None and not result.price_breaks:
+            return self.failed_result(mpn, "找到型号但未获取到报价")
+        return result
 
     async def _find_product_link(self, page, mpn: str) -> str | None:
         """Try to find a product detail link on the search results page."""
