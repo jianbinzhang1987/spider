@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
@@ -17,12 +18,18 @@ class BrowserPool:
         self,
         max_pages: int = 5,
         headless: bool = True,
+        storage_state_path: str | None = None,
     ) -> None:
         self._max_pages = max_pages
         self._headless = headless
+        self._storage_state_path = Path(storage_state_path) if storage_state_path else None
         self._semaphore = asyncio.Semaphore(max_pages)
         self._playwright = None
         self._browser: Browser | None = None
+
+    @property
+    def headless(self) -> bool:
+        return self._headless
 
     async def start(self) -> None:
         pw = await async_playwright().start()
@@ -43,14 +50,19 @@ class BrowserPool:
         await self._semaphore.acquire()
         if self._browser is None:
             await self.start()
-        context = await self._browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            user_agent=(
+        context_kwargs = {
+            "viewport": {"width": 1920, "height": 1080},
+            "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             ),
-            locale="zh-CN",
-            timezone_id="Asia/Shanghai",
+            "locale": "zh-CN",
+            "timezone_id": "Asia/Shanghai",
+        }
+        if self._storage_state_path and self._storage_state_path.exists():
+            context_kwargs["storage_state"] = str(self._storage_state_path)
+        context = await self._browser.new_context(
+            **context_kwargs,
         )
         page = await context.new_page()
         # Apply basic stealth
@@ -64,6 +76,9 @@ class BrowserPool:
     async def release_page(self, page: Page) -> None:
         """Release a page back to the pool."""
         try:
+            if self._storage_state_path:
+                self._storage_state_path.parent.mkdir(parents=True, exist_ok=True)
+                await page.context.storage_state(path=str(self._storage_state_path))
             await page.context.close()
         except Exception:
             pass

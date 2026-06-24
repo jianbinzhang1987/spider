@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.core.browser_pool import BrowserPool
-from src.models import PartResult
+from src.models import PartResult, QueryStatus
 
 # Import all adapters to trigger registration
 from src.adapters import oneyac, hqew, wlxmall, cmalls, icgoo, icstk, icdeal, allchips, ichunt, icnet, vipmro  # noqa: F401
@@ -28,11 +29,12 @@ logger = logging.getLogger(__name__)
 
 async def search_all(mpn: str, adapters: list[str] | None = None) -> list[PartResult]:
     """Search for a part number across all (or specified) adapters."""
-    pool = BrowserPool(max_pages=3, headless=True)
-    await pool.start()
+    pool: BrowserPool | None = None
 
     results: list[PartResult] = []
     adapter_names = adapters or AdapterRegistry.list_adapters()
+    browser_headless = _should_run_headless(adapter_names)
+    storage_state_path = "data/sessions/icdeal.json" if "icdeal" in adapter_names else None
 
     tasks = []
     instances = []
@@ -48,6 +50,13 @@ async def search_all(mpn: str, adapters: list[str] | None = None) -> list[PartRe
         if issubclass(adapter_cls, HttpAdapter):
             instance = adapter_cls()
         elif issubclass(adapter_cls, BrowserAdapter):
+            if pool is None:
+                pool = BrowserPool(
+                    max_pages=3,
+                    headless=browser_headless,
+                    storage_state_path=storage_state_path,
+                )
+                await pool.start()
             instance = adapter_cls(pool)
         else:
             continue
@@ -65,7 +74,7 @@ async def search_all(mpn: str, adapters: list[str] | None = None) -> list[PartRe
                 final_results.append(PartResult(
                     supplier=adapter_name,
                     query=mpn,
-                    status="failed",
+                    status=QueryStatus.FAILED,
                     error_message=str(r),
                 ))
             else:
@@ -78,9 +87,18 @@ async def search_all(mpn: str, adapters: list[str] | None = None) -> list[PartRe
             await instance.close()
         except Exception:
             pass
-    await pool.stop()
+    if pool is not None:
+        await pool.stop()
 
     return results
+
+
+def _should_run_headless(adapter_names: list[str]) -> bool:
+    """Use a visible browser for adapters that need manual user verification."""
+    env_value = os.getenv("BROWSER_HEADLESS")
+    if env_value is not None:
+        return env_value.strip().lower() not in {"0", "false", "no"}
+    return "icdeal" not in adapter_names
 
 
 async def main():

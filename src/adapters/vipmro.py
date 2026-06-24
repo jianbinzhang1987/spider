@@ -1,84 +1,116 @@
-"""京东工品汇 (vipmro.com) adapter — requires China IP."""
+"""京东工品汇 (vipmro.com) adapter — HTTP JSON API."""
 
 from __future__ import annotations
 
-import re
 import logging
+from typing import Any
 
-from src.adapters.base import BrowserAdapter
+from src.adapters.base import HttpAdapter
 from src.adapters.registry import AdapterRegistry
-from src.core.browser_pool import BrowserPool
 from src.models import PartResult
 
 logger = logging.getLogger(__name__)
 
 
 @AdapterRegistry.register("vipmro")
-class VipmroAdapter(BrowserAdapter):
+class VipmroAdapter(HttpAdapter):
     """
     京东工品汇 adapter.
 
-    Strategy: Playwright (requires China domestic IP to access).
-    Verified: Returns HTTP 493 from overseas IPs (geo-blocking).
-    Note: Can only be tested from China mainland server.
+    Strategy: call the JSON search API directly. Some overseas networks may still
+    receive JD Cloud HTTP 493 geo blocks, so keep explicit detection for that case.
     """
 
-    SEARCH_URL = "https://www.vipmro.com/search"
+    SEARCH_API = "https://www.vipmro.com/interface1/goods/search/mall/v2/1/20"
 
-    def __init__(self, browser_pool: BrowserPool) -> None:
-        super().__init__("京东工品汇", browser_pool)
+    def __init__(self, timeout: float = 20.0, min_interval: float = 1.5) -> None:
+        super().__init__("京东工品汇", timeout=timeout, min_interval=min_interval)
 
     async def search_by_mpn(self, mpn: str) -> PartResult:
-        page = await self._new_page()
         try:
-            url = f"{self.SEARCH_URL}?keywords={mpn}"
-            response = await page.goto(url, timeout=20000)
+            response = await self._fetch(
+                self.SEARCH_API,
+                params={
+                    "deliveryTime": "",
+                    "isSop": "0",
+                    "categoryId": "",
+                    "attrValueIds": "",
+                    "keyword": mpn,
+                    "sortFields": "",
+                    "sortFlags": "",
+                    "stock": "",
+                    "stockNew": "",
+                    "range": "",
+                    "gradeType": "",
+                    "searchType": "3",
+                    "platform": "2",
+                    "channel": "2",
+                },
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "Referer": f"https://www.vipmro.com/ss?keyword={mpn}",
+                },
+            )
 
-            if response and response.status == 493:
+            if response.status_code == 493:
                 return self.failed_result(mpn, "IP地域限制(HTTP 493)，需国内IP")
+            if response.status_code != 200:
+                return self.failed_result(mpn, f"HTTP {response.status_code}")
 
-            await page.wait_for_timeout(8000)
-            content = await page.content()
+            if "deny:geo" in str(response.headers).lower():
+                return self.failed_result(mpn, "IP地域限制(x-jfe-reason: deny:geo)，需国内IP")
 
-            # Check for block page
-            if "493" in content or "访问受限" in content:
-                return self.failed_result(mpn, "IP地域限制，需国内IP")
-
-            return self._parse_results(mpn, content, url)
+            return self._parse_json(mpn, response.json())
         except Exception as e:
             logger.error(f"[京东工品汇] search failed: {e}")
             return self.failed_result(mpn, str(e))
-        finally:
-            await self._release_page(page)
 
-    def _parse_results(self, mpn: str, html: str, url: str) -> PartResult:
-        """Parse product data from rendered HTML."""
-        mpn_norm = self._normalize_text(mpn)
+    def _parse_json(self, mpn: str, data: dict[str, Any]) -> PartResult:
+        """Parse product data from the search API JSON."""
+        if data.get("code") != 0:
+            return self.failed_result(mpn, data.get("msg") or "接口返回失败")
 
-        if mpn_norm not in self._normalize_text(html):
+        products = (data.get("data") or {}).get("goodsList") or []
+        if not products:
             return self.not_found_result(mpn)
 
-        prices = re.findall(r'[￥¥]\s*(\d+\.?\d*)', html)
-        price_values = [float(p) for p in prices if 0.0001 < float(p) < 100000]
+        mpn_norm = self._normalize_text(mpn)
+        exact_matches = [
+            item for item in products
+            if self._normalize_text(str(item.get("model") or "")) == mpn_norm
+        ]
+        candidates = exact_matches or [
+            item for item in products
+            if mpn_norm in self._normalize_text(str(item.get("model") or item.get("goodsName") or ""))
+        ]
+        if not candidates:
+            return self.not_found_result(mpn)
 
-        stock = None
-        stock_match = re.search(r'(?:库存|stock|现货)[：:\s]*(\d[\d,]*)', html, re.I)
-        if stock_match:
-            stock = self._to_int(stock_match.group(1))
-
-        brand = None
-        brand_match = re.search(r'(?:品牌|brand|厂商)[：:\s]*([^<\s]{2,30})', html, re.I)
-        if brand_match:
-            brand = brand_match.group(1)
+        best = sorted(
+            candidates,
+            key=lambda item: (
+                self._to_float(item.get("salePrice") or item.get("showPrice") or item.get("finalPrice")) is None,
+                self._to_float(item.get("salePrice") or item.get("showPrice") or item.get("finalPrice")) or 10**12,
+            ),
+        )[0]
 
         result_data = {
-            "mpn": mpn,
-            "brand": brand,
-            "stock": stock,
-            "product_url": url,
+            "mpn": best.get("model") or mpn,
+            "sku": best.get("buyNo") or best.get("goodsNo") or best.get("id"),
+            "brand": best.get("brandName") or (best.get("goodsName") or "").split(" ", 1)[0],
+            "stock": best.get("stock"),
+            "moq": best.get("orderQuantity") or best.get("batchQuantity"),
+            "price_unit": best.get("salePrice") or best.get("showPrice") or best.get("finalPrice"),
+            "lead_time": self._format_lead_time(best),
+            "description": best.get("goodsName"),
+            "datasheet_url": best.get("sjsc"),
+            "product_url": f"https://www.vipmro.com/ss?keyword={mpn}",
         }
 
-        if price_values:
-            result_data["price_unit"] = min(price_values)
-
         return self.success_result(mpn, result_data)
+
+    def _format_lead_time(self, item: dict[str, Any]) -> str | None:
+        delivery_time = item.get("deliveryTime")
+        if delivery_time in (None, ""):
+            return None
+        return f"{delivery_time}日发货"
