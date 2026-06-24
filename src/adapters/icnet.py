@@ -34,10 +34,14 @@ class IcnetAdapter(BrowserAdapter):
     LOGIN_URL = "https://member.ic.net.cn/login.php"
     SEARCH_URL = "https://www.ic.net.cn/search.php"
 
+    # Default credentials from code/config.py
+    DEFAULT_USERNAME = "15165098292"
+    DEFAULT_PASSWORD = "Lxf861211_"
+
     def __init__(self, browser_pool: BrowserPool, username: str = "", password: str = "") -> None:
         super().__init__("IC交易网", browser_pool)
-        self._username = username
-        self._password = password
+        self._username = username or self.DEFAULT_USERNAME
+        self._password = password or self.DEFAULT_PASSWORD
         self._logged_in = False
 
     async def search_by_mpn(self, mpn: str) -> PartResult:
@@ -161,36 +165,54 @@ class IcnetAdapter(BrowserAdapter):
             return False
 
     def _parse_results(self, mpn: str, html: str, url: str) -> PartResult:
-        """Parse product data from search results."""
+        """Parse product data from IC交易网 table-based search results.
+
+        DOM structure: <tbody> → <tr> → <td>序号</td><td>公司</td>
+        <td>型号</td><td>品牌</td><td>年份</td><td>封装</td>...
+        """
         mpn_norm = self._normalize_text(mpn)
 
         if mpn_norm not in self._normalize_text(html):
             return self.not_found_result(mpn)
 
-        prices = re.findall(r'[￥¥$]\s*(\d+\.?\d*)', html)
-        price_values = [float(p) for p in prices if 0.0001 < float(p) < 100000]
+        # Extract brand from table row: <td>MPN</td><td>BRAND</td>
+        brand = None
+        brand_pattern = re.compile(
+            r'<td[^>]*>\s*' + re.escape(mpn) + r'\s*</td>\s*<td[^>]*>\s*([^<]{2,50})\s*</td>',
+            re.IGNORECASE,
+        )
+        brand_match = brand_pattern.search(html)
+        if brand_match:
+            brand = brand_match.group(1).strip()
 
+        # Extract package from the column after brand (date_code then package)
+        package = None
+        pkg_pattern = re.compile(
+            r'<td[^>]*>\s*' + re.escape(mpn) + r'\s*</td>'
+            r'\s*<td[^>]*>[^<]*</td>'  # brand
+            r'\s*<td[^>]*>[^<]*</td>'  # date code
+            r'\s*<td[^>]*>\s*([^<]{2,30})\s*</td>',  # package
+            re.IGNORECASE,
+        )
+        pkg_match = pkg_pattern.search(html)
+        if pkg_match:
+            package = pkg_match.group(1).strip()
+
+        # Extract prices (¥X.XX patterns)
+        prices = re.findall(r'[￥¥]\s*(\d+\.?\d*)', html)
+        price_values = [float(p) for p in prices if 0.001 < float(p) < 100000]
+
+        # Extract stock from table data
         stock = None
         stock_match = re.search(r'(?:库存|stock|数量)[：:\s]*(\d[\d,]*)', html, re.I)
         if stock_match:
             stock = self._to_int(stock_match.group(1))
 
-        brand = None
-        brand_match = re.search(r'(?:品牌|brand|厂商)[：:\s]*([^<\s]{2,30})', html, re.I)
-        if brand_match:
-            brand = brand_match.group(1)
-
-        # Try to extract lead time
-        lead_time = None
-        lt_match = re.search(r'(?:货期|交期|lead)[：:\s]*([^<\n]{2,20})', html, re.I)
-        if lt_match:
-            lead_time = lt_match.group(1).strip()
-
         result_data: dict[str, Any] = {
             "mpn": mpn,
             "brand": brand,
+            "package": package,
             "stock": stock,
-            "lead_time": lead_time,
             "product_url": url,
         }
 
