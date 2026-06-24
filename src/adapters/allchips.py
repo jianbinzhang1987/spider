@@ -1,9 +1,21 @@
-"""硬之城 (allchips.com) adapter — Playwright with captcha solving."""
+"""硬之城 (allchips.com) adapter — Playwright with captcha solving.
+
+Captcha: YunZhiSuo (cdn.yzcstatic.com), mode=20 slider / mode=10 click.
+Verified approach:
+  - showCap() triggers captcha overlay
+  - Canvas (390x200) contains background; .cap-slider-piece has puzzle piece
+  - .cap-handle is the drag handle on .cap-track (390x44)
+  - ddddocr.slide_match(piece, bg, simple_target=True) → target_x = drag distance
+  - Success rate ~25-30% per attempt, 5 retries → ~80%+ overall
+"""
 
 from __future__ import annotations
 
-import re
+import asyncio
+import base64
 import logging
+import random
+import re
 from typing import Any
 
 from src.adapters.base import BrowserAdapter
@@ -14,46 +26,13 @@ from src.models import PartResult
 
 logger = logging.getLogger(__name__)
 
-# YunZhiSuo (云之锁) captcha selectors
-YZS_TRIGGER_SELECTORS = [
-    'a[onclick*="showCap"]',
-    '.captcha-trigger',
-    '[class*="captcha"] button',
-    '#captchaBtn',
-    '.yzsm_btn',
-]
-YZS_BG_SELECTORS = [
-    '.yzsm_bg img',
-    '.captcha-bg img',
-    '[class*="captcha-bg"] img',
-    'canvas.captcha-canvas',
-]
-YZS_SLIDE_SELECTORS = [
-    '.yzsm_slide_btn',
-    '.slider-btn',
-    '.captcha-slider-btn',
-    '[class*="slide"] .btn',
-    '.yzsm_drag_btn',
-]
-YZS_PIECE_SELECTORS = [
-    '.yzsm_slide_piece img',
-    '.captcha-piece img',
-    '.slide-piece',
-]
-
 
 @AdapterRegistry.register("allchips")
 class AllchipsAdapter(BrowserAdapter):
-    """
-    硬之城 adapter.
-
-    Strategy: Playwright + captcha solving (云之锁 CaptchaButton).
-    Captcha: cdn.yzcstatic.com, mode=20 (slider) / mode=10 (click).
-    Uses ddddocr for slider gap detection + human-like trajectory simulation.
-    """
+    """硬之城 adapter — Playwright + ddddocr slider captcha solving."""
 
     SEARCH_URL = "https://www.allchips.com/search"
-    MAX_CAPTCHA_RETRIES = 3
+    MAX_CAPTCHA_RETRIES = 5
 
     def __init__(self, browser_pool: BrowserPool) -> None:
         super().__init__("硬之城", browser_pool)
@@ -68,13 +47,24 @@ class AllchipsAdapter(BrowserAdapter):
 
             content = await page.content()
 
-            # Check for captcha and attempt to solve
             if self._has_captcha(content):
-                solved = await self._solve_with_retries(page)
+                solved = await self._solve_with_retries(page, mpn)
                 if not solved:
                     return self.failed_result(mpn, "验证码未通过(云之锁)")
-                await page.wait_for_timeout(5000)
+                # Captcha JS does location.reload() after solve — wait for it
+                await page.wait_for_timeout(3000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
                 content = await page.content()
+                # If still captcha, try one manual reload
+                if self._has_captcha(content) and len(content) < 10000:
+                    await page.goto(url, timeout=25000)
+                    await page.wait_for_timeout(5000)
+                    content = await page.content()
+                    if self._has_captcha(content) and len(content) < 10000:
+                        return self.failed_result(mpn, "验证码通过但cookie未持久化")
 
             return self._parse_results(mpn, content, url)
         except Exception as e:
@@ -84,151 +74,145 @@ class AllchipsAdapter(BrowserAdapter):
             await self._release_page(page)
 
     def _has_captcha(self, html: str) -> bool:
-        """Detect YunZhiSuo captcha presence."""
-        indicators = ["captchabutton", "yzcstatic", "验证码", "captcha", "yzsm_"]
+        """Detect YunZhiSuo captcha by checking for its script/DOM markers."""
+        indicators = ["captchabutton", "yzcstatic", "showcap"]
         html_lower = html.lower()
         return any(ind in html_lower for ind in indicators)
 
-    async def _solve_with_retries(self, page) -> bool:
-        """Attempt captcha solving with retries."""
-        for attempt in range(1, self.MAX_CAPTCHA_RETRIES + 1):
-            logger.info(f"[硬之城] Captcha attempt {attempt}/{self.MAX_CAPTCHA_RETRIES}")
-            solved = await self._attempt_captcha(page)
-            if solved:
-                return True
-            await page.wait_for_timeout(1000)
-        return False
+    async def _solve_with_retries(self, page, mpn: str) -> bool:
+        """Trigger captcha panel and attempt solving with retries."""
+        # Trigger the captcha overlay
+        has_showcap = await page.evaluate('typeof showCap === "function"')
+        if has_showcap:
+            await page.evaluate("showCap()")
+            await page.wait_for_timeout(4000)
+        else:
+            logger.warning("[硬之城] showCap() not available")
+            return False
 
-    async def _attempt_captcha(self, page) -> bool:
-        """
-        Attempt to solve YunZhiSuo slider captcha.
+        # Get initial captcha images
+        images = await self._get_captcha_images(page)
+        if not images:
+            logger.warning("[硬之城] Captcha images not available")
+            return False
 
-        Flow:
-        1. Click verification trigger button to show captcha panel
-        2. Wait for captcha images to load
-        3. Screenshot background + slider piece
-        4. Use ddddocr.slide_match() to detect gap position
-        5. Generate human-like drag trajectory
-        6. Perform drag action
-        """
+        bg_bytes, piece_bytes = images
+
         try:
-            # Step 1: Click trigger to show captcha panel
-            trigger = await self._find_element(page, YZS_TRIGGER_SELECTORS)
-            if trigger:
-                await trigger.click()
-                await page.wait_for_timeout(2000)
+            import ddddocr
+            detector = ddddocr.DdddOcr(det=False, ocr=False, show_ad=False)
+        except ImportError:
+            logger.error("[硬之城] ddddocr not installed")
+            return False
 
-            # Step 2: Get the background image
-            bg_element = await self._find_element(page, YZS_BG_SELECTORS)
-            if not bg_element:
-                logger.warning("[硬之城] Background image not found")
+        for attempt in range(1, self.MAX_CAPTCHA_RETRIES + 1):
+            result = detector.slide_match(piece_bytes, bg_bytes, simple_target=True)
+            gap_x = result.get("target_x", 0)
+            confidence = result.get("confidence", 0)
+            logger.info(
+                f"[硬之城] Attempt {attempt}/{self.MAX_CAPTCHA_RETRIES}: "
+                f"gap_x={gap_x}, conf={confidence:.2f}"
+            )
+
+            if gap_x <= 20:
+                continue
+
+            # Drag the handle
+            handle = await page.query_selector(".cap-handle")
+            if not handle:
+                logger.warning("[硬之城] No .cap-handle found")
+                return False
+            hbox = await handle.bounding_box()
+            if not hbox:
                 return False
 
-            # Step 3: Get slider piece image
-            piece_element = await self._find_element(page, YZS_PIECE_SELECTORS)
+            sx = hbox["x"] + hbox["width"] / 2
+            sy = hbox["y"] + hbox["height"] / 2
 
-            # Step 4: Get slider button
-            slider_btn = await self._find_element(page, YZS_SLIDE_SELECTORS)
-            if not slider_btn:
-                logger.warning("[硬之城] Slider button not found")
-                return False
-
-            # Step 5: Screenshot and detect gap
-            bg_bytes = await bg_element.screenshot()
-            piece_bytes = await piece_element.screenshot() if piece_element else None
-
-            if piece_bytes:
-                gap_x = self._solver.detect_slide_gap(bg_bytes, piece_bytes)
-            else:
-                gap_x = self._solver._detect_gap_from_bg(bg_bytes)
-
-            if gap_x <= 10:
-                logger.warning(f"[硬之城] Invalid gap position: {gap_x}")
-                return False
-
-            logger.info(f"[硬之城] Detected gap at x={gap_x}")
-
-            # Step 6: Perform drag with human-like trajectory
-            btn_box = await slider_btn.bounding_box()
-            if not btn_box:
-                return False
-
-            start_x = btn_box["x"] + btn_box["width"] / 2
-            start_y = btn_box["y"] + btn_box["height"] / 2
-
+            # drag_distance = gap_x (verified by testing)
             trajectory = self._solver.generate_trajectory(gap_x)
 
-            await page.mouse.move(start_x, start_y)
+            await page.mouse.move(sx, sy)
+            await asyncio.sleep(random.uniform(0.2, 0.35))
             await page.mouse.down()
-
-            import asyncio
-            import random
             await asyncio.sleep(random.uniform(0.08, 0.15))
-
             for x_offset, y_offset, dt in trajectory:
-                await page.mouse.move(start_x + x_offset, start_y + y_offset)
+                await page.mouse.move(sx + x_offset, sy + y_offset)
                 await asyncio.sleep(dt / 1000.0)
-
             await asyncio.sleep(random.uniform(0.05, 0.1))
             await page.mouse.up()
 
-            # Step 7: Verify result
-            await page.wait_for_timeout(2000)
-            content = await page.content()
+            await page.wait_for_timeout(3000)
 
-            if not self._has_captcha(content):
-                logger.info("[硬之城] Captcha solved successfully")
+            # Check if captcha track disappeared (= success)
+            track = await page.query_selector(".cap-track")
+            track_visible = False
+            if track:
+                try:
+                    track_visible = await track.is_visible()
+                except Exception:
+                    pass
+
+            if not track_visible:
+                logger.info(f"[硬之城] Captcha SOLVED on attempt {attempt}")
                 return True
 
-            # Check for explicit success/failure indicators
-            success_texts = ["验证成功", "通过验证"]
-            failure_texts = ["验证失败", "请重试"]
-            for text in success_texts:
-                if text in content:
-                    return True
-            for text in failure_texts:
-                if text in content:
-                    logger.info(f"[硬之城] Captcha failed: {text}")
-                    return False
+            # Failed — get fresh images for next attempt
+            logger.info(f"[硬之城] Attempt {attempt} failed, retrying...")
+            await page.wait_for_timeout(2000)
+            new_images = await self._get_captcha_images(page)
+            if new_images:
+                bg_bytes, piece_bytes = new_images
 
-            return False
+        return False
 
-        except Exception as e:
-            logger.warning(f"[硬之城] Captcha solving error: {e}")
-            return False
-
-    async def _find_element(self, page, selectors: list[str]):
-        """Try multiple selectors to find an element."""
-        for sel in selectors:
-            try:
-                elem = await page.query_selector(sel)
-                if elem:
-                    visible = await elem.is_visible()
-                    if visible:
-                        return elem
-            except Exception:
-                pass
-        return None
+    async def _get_captcha_images(self, page) -> tuple[bytes, bytes] | None:
+        """Extract canvas background and slider piece as bytes."""
+        images = await page.evaluate("""() => {
+            const canvas = document.querySelector('.cap-canvas-wrap canvas');
+            const piece = document.querySelector('.cap-slider-piece');
+            if (!canvas || !piece) return null;
+            const bg = canvas.toDataURL('image/png');
+            const ps = piece.src;
+            if (!bg || !ps || !bg.includes(',') || !ps.includes(',')) return null;
+            return { bg: bg, piece: ps };
+        }""")
+        if not images:
+            return None
+        try:
+            bg_bytes = base64.b64decode(images["bg"].split(",")[1])
+            piece_bytes = base64.b64decode(images["piece"].split(",")[1])
+            return bg_bytes, piece_bytes
+        except Exception:
+            return None
 
     def _parse_results(self, mpn: str, html: str, url: str) -> PartResult:
-        """Parse product data from rendered HTML."""
+        """Parse product data from allchips.com rendered HTML."""
         mpn_norm = self._normalize_text(mpn)
 
         if mpn_norm not in self._normalize_text(html):
             return self.not_found_result(mpn)
 
-        prices = re.findall(r'[￥¥$]\s*(\d+\.?\d*)', html)
-        price_values = [float(p) for p in prices if 0.0001 < float(p) < 100000]
+        prices = re.findall(r'[￥¥]\s*(\d+\.?\d*)', html)
+        price_values = [float(p) for p in prices if 0.001 < float(p) < 100000]
 
         stock = None
         stock_match = re.search(r'(?:库存|stock|现货)[：:\s]*(\d[\d,]*)', html, re.I)
         if stock_match:
             stock = self._to_int(stock_match.group(1))
 
+        # Brand: look for text content after "品牌" label inside elements
         brand = None
-        brand_match = re.search(r'(?:品牌|brand|厂商)[：:\s]*([^<\s]{2,30})', html, re.I)
-        if brand_match:
-            brand = brand_match.group(1)
+        brand_patterns = [
+            r'品牌[^>]*>[^<]*<[^>]*>([A-Za-z][A-Za-z0-9\s\-&.]{1,40})<',
+            r'manufacturer[^>]*>([A-Za-z][A-Za-z0-9\s\-&.]{1,40})<',
+            r'brand-name[^>]*>([A-Za-z][A-Za-z0-9\s\-&.]{1,40})<',
+        ]
+        for pattern in brand_patterns:
+            match = re.search(pattern, html, re.I)
+            if match:
+                brand = match.group(1).strip()
+                break
 
         result_data: dict[str, Any] = {
             "mpn": mpn,
