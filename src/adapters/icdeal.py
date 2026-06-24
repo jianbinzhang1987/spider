@@ -32,10 +32,20 @@ class IcdealAdapter(BrowserAdapter):
         page = await self._new_page()
         try:
             url = f"{self.SEARCH_URL}?searchKeyword={mpn}"
-            await page.goto(url, timeout=30000)
+            response = await page.goto(url, timeout=30000)
+
+            # Detect geo-block or WAF
+            if response and response.status in (403, 493, 503):
+                return self.failed_result(mpn, f"HTTP {response.status} - 可能需要国内IP")
+
             await page.wait_for_timeout(10000)
 
             content = await page.content()
+
+            # Check for WAF/block page indicators
+            if len(content) < 2000 and any(kw in content for kw in ["访问受限", "Access Denied", "403"]):
+                return self.failed_result(mpn, "WAF拦截 - 需要国内IP")
+
             return self._parse_results(mpn, content, url)
         except Exception as e:
             logger.error(f"[百能云芯] search failed: {e}")
