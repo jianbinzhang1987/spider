@@ -35,44 +35,68 @@ class IcdealAdapter(BrowserAdapter):
         page = await self._new_page()
         try:
             url = self.SEARCH_URL.format(mpn=mpn)
+
+            # Set realistic browser headers to reduce WAF triggering
+            await page.set_extra_http_headers({
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            })
+
             response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
             # Detect geo-block or WAF
             if response and response.status in (403, 493, 503):
                 return self.failed_result(mpn, f"HTTP {response.status} - 可能需要国内IP")
 
-            await page.wait_for_timeout(10000)
-
+            # Capture content quickly (before any JS WAF redirect kicks in)
+            # Wait just enough for Vue/React to render product data
+            await page.wait_for_timeout(5000)
             content = await page.content()
             current_url = page.url
 
-            # Check for WAF/block page indicators
+            # If WAF already redirected, try to get data from what we have
             if self._is_waf_page(current_url, content):
-                if not self._manual_verify:
-                    return self.failed_result(mpn, "WAF滑块验证，需要人工验证、持久化会话或官方接口")
+                # In headless mode, retry with a shorter wait
                 if self._pool.headless:
-                    return self.failed_result(mpn, "WAF滑块验证需要可见浏览器，请关闭 headless 后重试")
-                verified = await self._wait_for_manual_verification(page, url)
-                if not verified:
-                    return self.failed_result(mpn, "等待人工 WAF 验证超时")
-                await page.wait_for_timeout(5000)
-                content = await page.content()
-                current_url = page.url
-                if self._is_waf_page(current_url, content):
-                    return self.failed_result(mpn, "WAF滑块验证未通过")
-                if self._normalize_text(mpn) not in self._normalize_text(content):
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                    await page.wait_for_timeout(8000)
+                    try:
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        # Grab immediately after DOM is ready
+                        await page.wait_for_timeout(3000)
+                        content = await page.content()
+                        current_url = page.url
+                    except Exception:
+                        pass
+
+                    if self._is_waf_page(current_url, content):
+                        return self.failed_result(mpn, "WAF滑块验证，headless模式无法通过")
+                elif self._manual_verify:
+                    verified = await self._wait_for_manual_verification(page, url)
+                    if not verified:
+                        return self.failed_result(mpn, "等待人工 WAF 验证超时")
+                    await page.wait_for_timeout(5000)
                     content = await page.content()
                     current_url = page.url
                     if self._is_waf_page(current_url, content):
-                        return self.failed_result(mpn, "WAF滑块验证后再次触发验证")
+                        return self.failed_result(mpn, "WAF滑块验证未通过")
+                    if self._normalize_text(mpn) not in self._normalize_text(content):
+                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await page.wait_for_timeout(8000)
+                        content = await page.content()
+                        current_url = page.url
+                        if self._is_waf_page(current_url, content):
+                            return self.failed_result(mpn, "WAF滑块验证后再次触发验证")
+                else:
+                    return self.failed_result(mpn, "WAF滑块验证，需要人工验证、持久化会话或官方接口")
 
-            body_text = await page.locator("body").inner_text(timeout=5000)
-            text_result = self._parse_text_results(mpn, body_text, current_url)
-            if text_result.status.value != "not_found":
-                return text_result
+            # Try parsing body text first
+            try:
+                body_text = await page.locator("body").inner_text(timeout=5000)
+                text_result = self._parse_text_results(mpn, body_text, current_url)
+                if text_result.status.value != "not_found":
+                    return text_result
+            except Exception:
+                pass
 
+            # Fallback: parse raw HTML for prices
             return self._parse_results(mpn, content, current_url)
         except Exception as e:
             logger.error(f"[百能云芯] search failed: {e}")
@@ -99,11 +123,16 @@ class IcdealAdapter(BrowserAdapter):
             return self.not_found_result(mpn)
 
         blocks = []
-        marker = f"数据手册\n{mpn}"
-        for chunk in text.split(marker)[1:]:
-            block = f"{mpn}{chunk.split('官方客服电话', 1)[0]}"
-            if "品牌：" in block and "库存：" in block:
-                blocks.append(block)
+        # Try multiple marker patterns (text rendering may vary)
+        markers = [f"数据手册\n{mpn}", f"手册\n{mpn}", mpn]
+        for marker in markers:
+            if marker in text:
+                for chunk in text.split(marker)[1:]:
+                    block = f"{mpn}{chunk.split('官方客服电话', 1)[0]}"
+                    if ("品牌" in block or "库存" in block or "¥" in block):
+                        blocks.append(block)
+                if blocks:
+                    break
 
         if not blocks:
             return self.not_found_result(mpn)
@@ -160,7 +189,8 @@ class IcdealAdapter(BrowserAdapter):
         }
 
     def _match_label(self, text: str, label: str) -> str | None:
-        match = re.search(rf"{label}：\s*\n\s*([^\n]+)", text)
+        # Try full-width colon, half-width colon, or just the label
+        match = re.search(rf"{label}[：:]\s*\n?\s*([^\n]+)", text)
         if not match:
             return None
         return match.group(1).strip()

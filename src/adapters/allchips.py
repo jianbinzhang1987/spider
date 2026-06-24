@@ -39,6 +39,13 @@ class AllchipsAdapter(BrowserAdapter):
         self._solver = CaptchaSolver()
 
     async def search_by_mpn(self, mpn: str) -> PartResult:
+        # Check if ddddocr is available before acquiring a browser page
+        try:
+            import ddddocr  # noqa: F401
+        except ImportError:
+            logger.error("[硬之城] ddddocr not installed, skipping (pip install ddddocr)")
+            return self.failed_result(mpn, "ddddocr未安装，无法破解验证码(pip install ddddocr)")
+
         page = await self._new_page()
         try:
             url = f"{self.SEARCH_URL}?keyword={mpn}"
