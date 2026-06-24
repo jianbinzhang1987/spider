@@ -16,6 +16,7 @@ from src.models import PartResult
 
 # Import all adapters to trigger registration
 from src.adapters import oneyac, hqew, wlxmall, cmalls, icgoo, icstk, icdeal, allchips, ichunt, icnet, vipmro  # noqa: F401
+from src.adapters import digikey, mouser, element14, lcsc, ickey  # noqa: F401
 from src.adapters.registry import AdapterRegistry
 
 logging.basicConfig(
