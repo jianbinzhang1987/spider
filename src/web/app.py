@@ -133,10 +133,18 @@ async def download_result(task_id: str):
     output_path = OUTPUT_DIR / f"比价结果_{task_id}.xlsx"
     generate_result_excel(results, output_path)
 
+    from urllib.parse import quote
+    encoded_filename = quote(f"比价结果_{task_id}.xlsx")
     return FileResponse(
         output_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        filename=f"比价结果_{task_id}.xlsx",
+        filename=f"result_{task_id}.xlsx",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="result_{task_id}.xlsx"; '
+                f"filename*=UTF-8''{encoded_filename}"
+            )
+        },
     )
 
 
