@@ -68,22 +68,43 @@ class MouserAdapter(HttpAdapter):
         if not parts:
             return self.not_found_result(mpn)
 
-        part = parts[0]
+        # Find best matching part
+        mpn_norm = self._normalize_text(mpn)
+        part = None
+        for p in parts:
+            p_mpn = p.get("ManufacturerPartNumber", "")
+            if mpn_norm == self._normalize_text(p_mpn):
+                part = p
+                break
+        if not part:
+            part = parts[0]
 
         price_breaks = []
+        currency = "CNY"  # Default; detect from API response
         for pb in part.get("PriceBreaks") or []:
-            price_str = pb.get("Price", "").replace("$", "").replace(",", "").strip()
-            try:
-                price_val = float(price_str)
-            except (ValueError, TypeError):
-                price_val = None
-            price_breaks.append({
-                "quantity": pb.get("Quantity"),
-                "unit_price": price_val,
-            })
+            price_val = self._parse_price_str(pb.get("Price", ""))
+            qty = pb.get("Quantity")
+            if price_val and qty:
+                price_breaks.append({
+                    "quantity": qty,
+                    "unit_price": price_val,
+                })
+            # Detect currency from first PriceBreak
+            pb_currency = pb.get("Currency", "")
+            if pb_currency in ("USD", "US"):
+                currency = "USD"
+            elif pb_currency in ("RMB", "CNY", ""):
+                currency = "CNY"
 
         stock_str = part.get("Availability", "0")
-        stock = self._to_int(stock_str.split()[0] if stock_str else "0")
+        # Availability can be "0" or "300,325 In Stock" etc.
+        stock_num = "0"
+        if stock_str:
+            import re
+            nums = re.findall(r'[\d,]+', stock_str)
+            if nums:
+                stock_num = nums[0]
+        stock = self._to_int(stock_num)
 
         result_data: dict[str, Any] = {
             "mpn": part.get("ManufacturerPartNumber", mpn),
@@ -95,9 +116,26 @@ class MouserAdapter(HttpAdapter):
             "product_url": part.get("ProductDetailUrl"),
             "datasheet_url": part.get("DataSheetUrl"),
             "price_breaks": price_breaks,
+            "price_currency": currency,
         }
 
         if price_breaks and price_breaks[0].get("unit_price"):
             result_data["price_unit"] = price_breaks[0]["unit_price"]
 
         return self.success_result(mpn, result_data)
+
+    @staticmethod
+    def _parse_price_str(price_str: str) -> float | None:
+        """Parse price string in various currency formats (¥1.23, $0.52, CN¥1.23, etc.)."""
+        if not price_str:
+            return None
+        import re
+        # Remove all currency symbols and whitespace, keep digits and decimal point
+        cleaned = re.sub(r'[^\d.]', '', price_str)
+        if not cleaned:
+            return None
+        try:
+            val = float(cleaned)
+            return val if val > 0 else None
+        except (ValueError, TypeError):
+            return None

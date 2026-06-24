@@ -107,29 +107,78 @@ class DigikeyAdapter(HttpAdapter):
         if not products:
             return self.not_found_result(mpn)
 
-        product = products[0]
+        # Find best matching product (V4 uses ManufacturerProductNumber)
+        mpn_norm = self._normalize_text(mpn)
+        product = None
+        for p in products:
+            p_mpn = p.get("ManufacturerProductNumber") or p.get("ManufacturerPartNumber") or ""
+            if mpn_norm == self._normalize_text(p_mpn):
+                product = p
+                break
+        if not product:
+            product = products[0]
 
+        # Extract price breaks — prefer full ladder from ProductVariations
         price_breaks = []
-        for pb in product.get("StandardPricing") or []:
-            price_breaks.append({
-                "quantity": pb.get("BreakQuantity"),
-                "unit_price": pb.get("UnitPrice"),
-            })
+
+        # First, try ProductVariations (contains packaging-specific pricing)
+        variations = product.get("ProductVariations") or []
+        for var in variations:
+            sp = var.get("StandardPricing") or []
+            if sp and len(sp) > len(price_breaks):
+                # Use the variation with the most price breaks (fullest ladder)
+                candidate = []
+                for pb in sp:
+                    qty = pb.get("BreakQuantity") or pb.get("Quantity")
+                    price = pb.get("UnitPrice") or pb.get("Price")
+                    if qty and price:
+                        candidate.append({"quantity": qty, "unit_price": price})
+                if len(candidate) > len(price_breaks):
+                    price_breaks = candidate
+
+        # Fallback to top-level StandardPricing
+        if not price_breaks:
+            for pb in product.get("StandardPricing") or []:
+                qty = pb.get("BreakQuantity") or pb.get("Quantity")
+                price = pb.get("UnitPrice") or pb.get("Price")
+                if qty and price:
+                    price_breaks.append({"quantity": qty, "unit_price": price})
+
+        # Also try direct unit price field
+        unit_price = None
+        if price_breaks:
+            unit_price = price_breaks[0].get("unit_price")
+        if not unit_price:
+            # Try UnitPrice as a direct numeric value
+            for field in ("UnitPrice", "unitPrice", "SearchLocaleUnitPrice"):
+                val = product.get(field)
+                if isinstance(val, (int, float)) and val > 0:
+                    unit_price = val
+                    break
+
+        # Get SKU from first variation if not at top level
+        sku = product.get("DigiKeyPartNumber")
+        if not sku and product.get("ProductVariations"):
+            sku = product["ProductVariations"][0].get("DigiKeyProductNumber")
+
+        # Get MOQ from first variation
+        moq = product.get("MinimumOrderQuantity")
+        if not moq and product.get("ProductVariations"):
+            moq = product["ProductVariations"][0].get("MinimumOrderQuantity")
 
         result_data: dict[str, Any] = {
-            "mpn": product.get("ManufacturerPartNumber", mpn),
-            "sku": product.get("DigiKeyPartNumber"),
-            "brand": product.get("Manufacturer", {}).get("Name"),
-            "description": product.get("ProductDescription"),
+            "mpn": product.get("ManufacturerProductNumber") or product.get("ManufacturerPartNumber") or mpn,
+            "sku": sku,
+            "brand": product.get("Manufacturer", {}).get("Name") if isinstance(product.get("Manufacturer"), dict) else product.get("Manufacturer"),
+            "description": product.get("ProductDescription") or (product.get("Description", {}).get("DetailedDescription") if isinstance(product.get("Description"), dict) else product.get("Description")),
             "stock": product.get("QuantityAvailable"),
-            "moq": product.get("MinimumOrderQuantity"),
+            "moq": moq,
             "package": product.get("Packaging", {}).get("Value") if isinstance(product.get("Packaging"), dict) else None,
             "product_url": product.get("ProductUrl"),
-            "datasheet_url": product.get("DatasheetUrl"),
+            "datasheet_url": product.get("DatasheetUrl") or (product.get("PrimaryDatasheet") if isinstance(product.get("PrimaryDatasheet"), str) else None),
             "price_breaks": price_breaks,
+            "price_unit": unit_price,
+            "price_currency": "USD",
         }
-
-        if price_breaks:
-            result_data["price_unit"] = price_breaks[0].get("unit_price")
 
         return self.success_result(mpn, result_data)

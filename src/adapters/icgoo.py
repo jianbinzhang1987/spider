@@ -38,18 +38,24 @@ class IcgooAdapter(BrowserAdapter):
 
             async def capture_response(response):
                 url = response.url
-                if "v8back.icgoo.net/api/search/supplier" in url:
+                # Capture any API response from icgoo backend
+                if "icgoo.net/api/" in url or "v8back.icgoo.net" in url:
                     try:
+                        ct = response.headers.get("content-type", "")
+                        if "json" not in ct and "text" not in ct:
+                            return
                         text = await response.text()
-                        if text.startswith("{") or text.startswith("["):
-                            api_data["supplier"] = json.loads(text)
-                    except Exception:
-                        pass
-                elif "v8back.icgoo.net/api/search/batch_price" in url:
-                    try:
-                        text = await response.text()
-                        if text.startswith("{") or text.startswith("["):
-                            api_data["price"] = json.loads(text)
+                        if not text or (not text.startswith("{") and not text.startswith("[")):
+                            return
+                        data = json.loads(text)
+                        if "supplier" in url or "search" in url:
+                            api_data["supplier"] = data
+                        if "price" in url or "batch" in url:
+                            api_data["price"] = data
+                        # Store all API responses for fallback
+                        if "all" not in api_data:
+                            api_data["all"] = []
+                        api_data["all"].append(data)
                     except Exception:
                         pass
 
@@ -67,6 +73,13 @@ class IcgooAdapter(BrowserAdapter):
                         price = self._extract_batch_price(mpn, api_data["price"])
                         if price is not None:
                             result.price_unit = price
+                    # If still no price, try all captured API responses
+                    if result.price_unit is None and api_data.get("all"):
+                        for resp_data in api_data["all"]:
+                            price = self._extract_batch_price(mpn, resp_data)
+                            if price is not None:
+                                result.price_unit = price
+                                break
                     return result
 
             # Fallback: parse rendered DOM
@@ -195,8 +208,21 @@ class IcgooAdapter(BrowserAdapter):
 
         # ICGOO shows inquiry button (询价) rather than direct prices for many items
         has_inquiry = "询价" in html
+
+        # Try multiple price patterns
+        price_values: list[float] = []
+
+        # Pattern 1: Currency symbol followed by number
         prices = re.findall(r'[￥¥$]\s*(\d+\.?\d*)', html)
-        price_values = [float(p) for p in prices if 0.0001 < float(p) < 100000]
+        price_values.extend(float(p) for p in prices if 0.0001 < float(p) < 100000)
+
+        # Pattern 2: Price in data attributes or JSON embedded in page
+        data_prices = re.findall(r'"(?:price|unitPrice|unit_price|sell_price)"[:\s]*["\']?(\d+\.?\d*)', html)
+        price_values.extend(float(p) for p in data_prices if 0.0001 < float(p) < 100000)
+
+        # Pattern 3: Ladder price patterns (e.g., "1+ ¥0.05")
+        ladder_prices = re.findall(r'\d+\+\s*[￥¥$]?\s*(\d+\.?\d+)', html)
+        price_values.extend(float(p) for p in ladder_prices if 0.0001 < float(p) < 100000)
 
         result_data: dict[str, Any] = {
             "mpn": mpn,

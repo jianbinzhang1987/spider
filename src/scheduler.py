@@ -119,10 +119,9 @@ class BatchScheduler:
 
         return matched_price
 
-    def _is_usd_supplier(self, supplier: str) -> bool:
-        """Determine if a supplier uses USD pricing."""
-        usd_suppliers = {"Digi-Key", "Mouser", "element14"}
-        return supplier in usd_suppliers
+    def _is_usd_price(self, result: PartResult) -> bool:
+        """Determine if the result's price is in USD (needs conversion to CNY)."""
+        return result.price_currency == "USD"
 
     async def search_single_item(
         self,
@@ -221,7 +220,7 @@ class BatchScheduler:
             price = result.price_unit
 
         if price is not None:
-            if self._is_usd_supplier(result.supplier):
+            if self._is_usd_price(result):
                 row.price_cny = round(price * exchange_rate, 4)
                 row.price_original = f"${price} USD"
             else:
