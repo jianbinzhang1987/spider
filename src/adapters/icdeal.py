@@ -41,7 +41,7 @@ class IcdealAdapter(BrowserAdapter):
                 "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             })
 
-            response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            response = await self._goto_with_retry(page, url)
 
             # Detect geo-block or WAF
             if response and response.status in (403, 493, 503):
@@ -58,7 +58,7 @@ class IcdealAdapter(BrowserAdapter):
                 # In headless mode, retry with a shorter wait
                 if self._pool.headless:
                     try:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await self._goto_with_retry(page, url)
                         # Grab immediately after DOM is ready
                         await page.wait_for_timeout(3000)
                         content = await page.content()
@@ -78,7 +78,7 @@ class IcdealAdapter(BrowserAdapter):
                     if self._is_waf_page(current_url, content):
                         return self.failed_result(mpn, "WAF滑块验证未通过")
                     if self._normalize_text(mpn) not in self._normalize_text(content):
-                        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        await self._goto_with_retry(page, url)
                         await page.wait_for_timeout(8000)
                         content = await page.content()
                         current_url = page.url
@@ -212,6 +212,16 @@ class IcdealAdapter(BrowserAdapter):
             if not self._is_waf_page(page.url, html):
                 return True
 
+            if "waf.icdeal.com/waf/verification" in page.url and "403 Forbidden" in html:
+                try:
+                    await self._goto_with_retry(page, target_url)
+                    await page.wait_for_timeout(3000)
+                    html = await page.content()
+                    if not self._is_waf_page(page.url, html):
+                        return True
+                except Exception:
+                    pass
+
             # Some WAF pages clear the challenge but do not redirect reliably.
             body_text = ""
             try:
@@ -220,12 +230,39 @@ class IcdealAdapter(BrowserAdapter):
                 pass
             if "验证成功" in body_text or "success" in body_text.lower():
                 try:
-                    await page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+                    await self._goto_with_retry(page, target_url)
                     return True
                 except Exception:
                     return False
 
         return False
+
+    async def _goto_with_retry(self, page, url: str):
+        """Navigate to icdeal with a softer retry for transient WAF/network aborts."""
+        last_error: Exception | None = None
+        for attempt, wait_until in enumerate(("domcontentloaded", "commit", "domcontentloaded"), start=1):
+            try:
+                response = await page.goto(url, wait_until=wait_until, timeout=30000)
+                if wait_until == "commit":
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=12000)
+                    except Exception:
+                        pass
+                return response
+            except Exception as e:
+                last_error = e
+                message = str(e)
+                retryable = (
+                    "ERR_CONNECTION_ABORTED" in message
+                    or "Timeout" in message
+                    or "Navigation" in message
+                )
+                if not retryable or attempt == 3:
+                    raise
+                await page.wait_for_timeout(2000 * attempt)
+        if last_error:
+            raise last_error
+        return None
 
     def _parse_results(self, mpn: str, html: str, url: str) -> PartResult:
         """Parse product data from rendered HTML."""

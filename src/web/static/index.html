@@ -92,6 +92,56 @@
             background: #52c41a;
         }
         .btn-download:hover { background: #73d13d; }
+        .verify-toolbar {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 12px;
+        }
+        .verify-input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #d9d9d9;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        .verify-actions {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 10px;
+        }
+        .btn-verify {
+            margin-top: 0;
+            padding: 10px 12px;
+            font-size: 14px;
+        }
+        .verify-status {
+            margin-top: 16px;
+            padding: 12px;
+            border-radius: 6px;
+            background: #fafafa;
+            border: 1px solid #eee;
+            color: #555;
+            font-size: 14px;
+            line-height: 1.6;
+            display: none;
+        }
+        .verify-status.active { display: block; }
+        .verify-status.success {
+            background: #f6ffed;
+            border-color: #b7eb8f;
+            color: #237804;
+        }
+        .verify-status.failed {
+            background: #fff2f0;
+            border-color: #ffccc7;
+            color: #a8071a;
+        }
+        .verify-save {
+            display: none;
+            margin-top: 12px;
+            background: #52c41a;
+        }
+        .verify-save.active { display: inline-block; }
         .progress-section { display: none; }
         .progress-section.active { display: block; }
         .progress-bar-container {
@@ -160,11 +210,28 @@
         <p class="subtitle">上传Excel文件，自动在多个平台查询价格、库存、货期</p>
 
         <div class="card">
-            <div class="upload-zone" id="uploadZone">
+            <h3 style="margin-bottom:12px;">站点验证</h3>
+            <div class="verify-toolbar">
+                <input class="verify-input" id="verifyMpn" value="RC0402FR-0710KL" placeholder="用于验证的测试型号">
+                <div class="verify-actions">
+                    <button class="btn btn-verify" data-verify="icdeal">验证百能</button>
+                    <button class="btn btn-verify" data-verify="allchips">验证硬之城</button>
+                    <button class="btn btn-verify" data-verify="icgoo">验证ICGOO</button>
+                    <button class="btn btn-verify" data-verify="icnet">验证IC交易网</button>
+                    <button class="btn btn-verify" data-verify="digikey">验证Digi-Key</button>
+                    <button class="btn btn-verify" data-verify="mouser">验证Mouser</button>
+                </div>
+            </div>
+            <div class="verify-status" id="verifyStatus"></div>
+            <button class="btn btn-verify verify-save" id="verifySaveBtn">保存session并关闭浏览器</button>
+        </div>
+
+        <div class="card">
+            <label class="upload-zone" id="uploadZone" for="fileInput">
                 <div class="icon">📄</div>
                 <p>点击或拖拽上传 Excel 文件</p>
                 <p class="hint">支持 .xlsx / .xls 格式，需包含"型号"列</p>
-            </div>
+            </label>
             <input type="file" id="fileInput" accept=".xlsx,.xls">
             <div class="file-info" id="fileInfo" style="display:none">
                 <span class="name" id="fileName"></span>
@@ -173,6 +240,9 @@
 
             <details class="adapter-select">
                 <summary>选择查询平台（默认全选）</summary>
+                <p class="hint" style="margin-top:8px;">
+                    百能云芯、硬之城、ICGOO 如需验证码/登录，请先使用上方站点验证入口保存 session。
+                </p>
                 <div class="adapter-grid" id="adapterGrid"></div>
             </details>
 
@@ -209,9 +279,14 @@
         const statusBadge = document.getElementById('statusBadge');
         const downloadBtn = document.getElementById('downloadBtn');
         const adapterGrid = document.getElementById('adapterGrid');
+        const verifyMpn = document.getElementById('verifyMpn');
+        const verifyStatus = document.getElementById('verifyStatus');
+        const verifySaveBtn = document.getElementById('verifySaveBtn');
 
         let selectedFile = null;
         let pollTimer = null;
+        let verifyPollTimer = null;
+        let currentVerifyTaskId = null;
 
         // Load adapters
         fetch('/api/adapters').then(r => r.json()).then(data => {
@@ -221,8 +296,11 @@
             ).join('');
         });
 
+        document.querySelectorAll('[data-verify]').forEach(btn => {
+            btn.addEventListener('click', () => startVerification(btn.dataset.verify, btn));
+        });
+
         // Upload zone events
-        uploadZone.addEventListener('click', () => fileInput.click());
         uploadZone.addEventListener('dragover', e => {
             e.preventDefault();
             uploadZone.classList.add('dragover');
@@ -317,9 +395,7 @@
                 progressBar.style.width = '100%';
                 progressPct.textContent = '100%';
                 downloadBtn.style.display = 'block';
-                downloadBtn.onclick = () => {
-                    window.location.href = `/api/task/${taskId}/download`;
-                };
+                downloadBtn.onclick = () => downloadResult(taskId);
                 submitBtn.textContent = '开始查询';
                 submitBtn.disabled = false;
             } else if (data.status === 'failed') {
@@ -329,6 +405,124 @@
                 submitBtn.textContent = '重新查询';
                 submitBtn.disabled = false;
             }
+        }
+
+        async function downloadResult(taskId) {
+            try {
+                const resp = await fetch(`/api/task/${taskId}/download`);
+                if (!resp.ok) {
+                    const data = await resp.json().catch(() => ({}));
+                    alert(data.detail || '下载失败');
+                    return;
+                }
+                const blob = await resp.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `比价结果_${taskId}.xlsx`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                alert('下载失败: ' + e.message);
+            }
+        }
+
+        async function startVerification(adapterName, button) {
+            const mpn = (verifyMpn.value || 'RC0402FR-0710KL').trim();
+            setVerifyStatus('running', '正在打开可见浏览器，请在弹出的浏览器中完成验证码/登录...');
+            verifySaveBtn.classList.remove('active');
+            currentVerifyTaskId = null;
+            setVerifyButtonsDisabled(true);
+
+            try {
+                const resp = await fetch(`/api/verification/${adapterName}?mpn=${encodeURIComponent(mpn)}`, {
+                    method: 'POST'
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    setVerifyStatus('failed', data.detail || '验证任务创建失败');
+                    setVerifyButtonsDisabled(false);
+                    return;
+                }
+                currentVerifyTaskId = data.task_id;
+                verifySaveBtn.classList.add('active');
+                pollVerification(data.task_id);
+            } catch (e) {
+                setVerifyStatus('failed', '网络错误: ' + e.message);
+                setVerifyButtonsDisabled(false);
+            }
+        }
+
+        verifySaveBtn.addEventListener('click', async () => {
+            if (!currentVerifyTaskId) return;
+            verifySaveBtn.disabled = true;
+            verifySaveBtn.textContent = '保存中...';
+            try {
+                const resp = await fetch(`/api/verification/${currentVerifyTaskId}/complete`, {
+                    method: 'POST'
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    setVerifyStatus('failed', data.detail || '保存session失败');
+                    setVerifyButtonsDisabled(false);
+                    verifySaveBtn.disabled = false;
+                    verifySaveBtn.textContent = '保存session并关闭浏览器';
+                    return;
+                }
+                setVerifyStatus('running', data.message || '正在保存 session...');
+            } catch (e) {
+                setVerifyStatus('failed', '保存失败: ' + e.message);
+                setVerifyButtonsDisabled(false);
+                verifySaveBtn.disabled = false;
+                verifySaveBtn.textContent = '保存session并关闭浏览器';
+            }
+        });
+
+        function pollVerification(taskId) {
+            if (verifyPollTimer) clearInterval(verifyPollTimer);
+            verifyPollTimer = setInterval(async () => {
+                try {
+                    const resp = await fetch(`/api/verification/${taskId}/status`);
+                    const data = await resp.json();
+                    const text = `${data.adapter_label}: ${data.message}${data.error ? '；' + data.error : ''}`;
+                    if (data.status === 'completed') {
+                        clearInterval(verifyPollTimer);
+                        setVerifyStatus('success', text);
+                        setVerifyButtonsDisabled(false);
+                        verifySaveBtn.classList.remove('active');
+                        verifySaveBtn.disabled = false;
+                        verifySaveBtn.textContent = '保存session并关闭浏览器';
+                        currentVerifyTaskId = null;
+                    } else if (data.status === 'failed') {
+                        clearInterval(verifyPollTimer);
+                        setVerifyStatus('failed', text);
+                        setVerifyButtonsDisabled(false);
+                        verifySaveBtn.classList.remove('active');
+                        verifySaveBtn.disabled = false;
+                        verifySaveBtn.textContent = '保存session并关闭浏览器';
+                        currentVerifyTaskId = null;
+                    } else {
+                        setVerifyStatus('running', text);
+                    }
+                } catch (e) {
+                    console.error('Verification poll error:', e);
+                }
+            }, 2000);
+        }
+
+        function setVerifyStatus(type, message) {
+            verifyStatus.className = 'verify-status active';
+            if (type === 'success') verifyStatus.classList.add('success');
+            if (type === 'failed') verifyStatus.classList.add('failed');
+            verifyStatus.textContent = message;
+        }
+
+        function setVerifyButtonsDisabled(disabled) {
+            document.querySelectorAll('[data-verify]').forEach(btn => {
+                btn.disabled = disabled;
+            });
         }
     </script>
 </body>

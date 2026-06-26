@@ -128,7 +128,7 @@ class IcstkAdapter(BrowserAdapter):
             "moq": best.get("MOQ") or best.get("OrderQty"),
             "price_unit": price_unit,
             "price_breaks": price_breaks,
-            "lead_time": best.get("Delivery") or best.get("LeadTime") or best.get("ShipTo"),
+            "lead_time": self._format_lead_time(best),
             "product_url": detail_url or url,
             "datasheet_url": best.get("PdfUrl"),
         })
@@ -189,6 +189,43 @@ class IcstkAdapter(BrowserAdapter):
                         breaks.append({"quantity": qty, "unit_price": price})
 
         return sorted(breaks, key=lambda item: int(item["quantity"]))
+
+    def _format_lead_time(self, product: dict[str, Any]) -> str | None:
+        lead_time = product.get("LeadTime")
+        lead_time_json = product.get("LeadTimeJson") or lead_time
+        if isinstance(lead_time_json, str) and lead_time_json.strip():
+            try:
+                data = json.loads(lead_time_json)
+            except json.JSONDecodeError:
+                data = None
+            if isinstance(data, dict):
+                parts = []
+                domestic = data.get("DomesticLeadTime")
+                domestic_unit = self._format_time_unit(data.get("DomesticLeadTimeUnit"))
+                if domestic:
+                    parts.append(f"大陆: {domestic}{domestic_unit}")
+                hk = data.get("HKLeadTime")
+                hk_unit = self._format_time_unit(data.get("HKLeadTimeUnit"))
+                if hk:
+                    parts.append(f"香港: {hk}{hk_unit}")
+                if parts:
+                    return "；".join(parts)
+
+        if lead_time and not str(lead_time).strip().startswith("{"):
+            return str(lead_time)
+
+        fallback = product.get("Delivery") or product.get("ShipTo")
+        if fallback and str(fallback).strip().lower() not in {"china", "hk,china"}:
+            return str(fallback)
+        return None
+
+    def _format_time_unit(self, unit: Any) -> str:
+        unit_text = str(unit or "").lower()
+        if unit_text == "day":
+            return "天"
+        if unit_text == "week":
+            return "周"
+        return str(unit or "")
 
     def _parse_results(self, mpn: str, html: str, url: str) -> PartResult:
         """Parse product data from rendered HTML."""

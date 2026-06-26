@@ -31,12 +31,16 @@ class HqewAdapter(BrowserAdapter):
     async def search_by_mpn(self, mpn: str) -> PartResult:
         page = await self._new_page()
         try:
-            url = f"{self.SEARCH_URL}?cid=0&q={mpn}"
+            url = f"https://s.hqew.com/{mpn}.html"
             await page.goto(url, timeout=25000)
             await page.wait_for_timeout(8000)
 
             content = await page.content()
-            return self._parse_results(mpn, content, url)
+            try:
+                body_text = await page.locator("body").inner_text(timeout=5000)
+            except Exception:
+                body_text = ""
+            return self._parse_results(mpn, f"{content}\n{body_text}", url)
         except Exception as e:
             logger.error(f"[华强电子网] search failed: {e}")
             return self.failed_result(mpn, str(e))
@@ -57,12 +61,22 @@ class HqewAdapter(BrowserAdapter):
             return self.not_found_result(mpn)
 
         if not prices:
-            return self.not_found_result(mpn)
+            return self.success_result(mpn, {
+                "mpn": mpn,
+                "brand": self._extract_brand(html, mpn),
+                "stock": self._extract_stock(html),
+                "product_url": url,
+            })
 
         # Get the lowest price
         price_values = [float(p) for p in prices if 0.0001 < float(p) < 100000]
         if not price_values:
-            return self.not_found_result(mpn)
+            return self.success_result(mpn, {
+                "mpn": mpn,
+                "brand": self._extract_brand(html, mpn),
+                "stock": self._extract_stock(html),
+                "product_url": url,
+            })
 
         best_price = min(price_values)
 
@@ -82,8 +96,15 @@ class HqewAdapter(BrowserAdapter):
 
     def _extract_brand(self, html: str, mpn: str) -> str | None:
         """Try to extract brand name near the model number."""
+        near_match = re.search(
+            re.escape(mpn) + r"[\s\S]{0,180}?([A-Z][A-Za-z0-9]{1,20}/[\u4e00-\u9fff]{1,12})",
+            html,
+            re.I,
+        )
+        if near_match:
+            return near_match.group(1).strip()
         # Common pattern: brand/中文名
-        brands = re.findall(r'([A-Z][A-Za-z]+)/([^\s<"]{2,8})', html)
+        brands = re.findall(r'([A-Z][A-Za-z0-9]{1,20})/([\u4e00-\u9fff]{2,8})', html)
         if brands:
             return f"{brands[0][0]}/{brands[0][1]}"
         # Single brand name

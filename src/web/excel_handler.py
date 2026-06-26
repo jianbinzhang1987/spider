@@ -39,7 +39,7 @@ def parse_upload_excel(file_path: Path) -> list[SearchItem]:
     # Map columns
     mpn_col = _find_column(headers, ["型号", "mpn", "part number", "元器件型号", "partnumber", "part_number"])
     brand_col = _find_column(headers, ["品牌", "brand", "manufacturer", "厂商", "厂家"])
-    qty_col = _find_column(headers, ["数量", "采购数量", "quantity", "qty", "购买数量"])
+    qty_col = _find_column(headers, ["数量", "总数量", "采购数量", "quantity", "qty", "购买数量"])
 
     if mpn_col is None:
         raise ValueError("找不到'型号'列（支持: 型号/MPN/Part Number/元器件型号）")
@@ -91,7 +91,7 @@ def generate_result_excel(results: list[SearchResultRow], output_path: Path) -> 
     # Header
     headers = [
         "型号", "品牌", "采购数量", "适用价格(人民币)", "库存数量",
-        "货期", "来源网站", "渠道链接", "原始币种价格", "查询时间", "最低价", "状态"
+        "货期", "来源网站", "渠道链接", "原始币种价格", "查询时间", "最低价", "状态", "错误信息"
     ]
     header_font = Font(bold=True)
     header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
@@ -119,6 +119,7 @@ def generate_result_excel(results: list[SearchResultRow], output_path: Path) -> 
         ws.cell(row=row_idx, column=10, value=result.query_time)
         ws.cell(row=row_idx, column=11, value="⭐" if result.is_best_price else "")
         ws.cell(row=row_idx, column=12, value=result.status)
+        ws.cell(row=row_idx, column=13, value=_error_message(result))
 
         # Highlight best price row
         if result.is_best_price:
@@ -136,6 +137,21 @@ def generate_result_excel(results: list[SearchResultRow], output_path: Path) -> 
 
     wb.save(output_path)
     logger.info(f"Result Excel saved: {output_path} ({len(results)} rows)")
+
+
+def _error_message(result: SearchResultRow) -> str | None:
+    """Ensure every non-success row explains why it has no usable price."""
+    if result.status == "success" and result.price_cny is None:
+        return result.error or "渠道返回了匹配型号，但未返回可解析价格，可能需要询价或登录查看"
+    if result.status == "success":
+        return result.error
+    if result.error:
+        return result.error
+    if result.status == "not_found":
+        return "未在该渠道找到匹配型号"
+    if result.status == "failed":
+        return "查询失败，适配器未返回具体错误"
+    return "无可用结果"
 
 
 def _find_column(headers: list[str], candidates: list[str]) -> int | None:

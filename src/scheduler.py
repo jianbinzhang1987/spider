@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -211,6 +212,11 @@ class BatchScheduler:
             error=result.error_message,
         )
 
+        if result.status == QueryStatus.NOT_FOUND and not row.error:
+            row.error = "未在该渠道找到匹配型号"
+        elif result.status == QueryStatus.FAILED and not row.error:
+            row.error = "查询失败，适配器未返回具体错误"
+
         if result.status != QueryStatus.SUCCESS:
             return row
 
@@ -226,6 +232,8 @@ class BatchScheduler:
             else:
                 row.price_cny = price
                 row.price_original = f"¥{price} CNY"
+        elif result.status == QueryStatus.SUCCESS:
+            row.error = result.error_message or "渠道返回了匹配型号，但未返回可解析价格，可能需要询价或登录查看"
 
         return row
 
@@ -250,7 +258,13 @@ class BatchScheduler:
         progress.status = "running"
 
         if use_browser:
-            self._pool = BrowserPool(max_pages=3, headless=True)
+            headless = self._should_run_headless()
+            storage_state_path = self._storage_state_path()
+            self._pool = BrowserPool(
+                max_pages=3,
+                headless=headless,
+                storage_state_path=storage_state_path,
+            )
             await self._pool.start()
 
         all_results: list[SearchResultRow] = []
@@ -271,3 +285,29 @@ class BatchScheduler:
         progress.status = "completed"
         progress.results = all_results
         return all_results
+
+    def _should_run_headless(self) -> bool:
+        """Run batch searches headless by default; manual verification is preflighted separately."""
+        env_value = os.getenv("BROWSER_HEADLESS")
+        if env_value is not None:
+            return env_value.strip().lower() not in {"0", "false", "no"}
+        return True
+
+    def _storage_state_path(self) -> str | None:
+        """Choose a browser session file for adapters that benefit from verification reuse."""
+        session_sites = {"icdeal", "allchips", "icgoo", "icnet", "digikey", "mouser"}.intersection(self._adapter_names)
+        if len(session_sites) > 1:
+            return "data/sessions/browser_state.json"
+        if "icdeal" in self._adapter_names:
+            return "data/sessions/icdeal.json"
+        if "allchips" in self._adapter_names:
+            return "data/sessions/allchips.json"
+        if "icgoo" in self._adapter_names:
+            return "data/sessions/icgoo.json"
+        if "icnet" in self._adapter_names:
+            return "data/sessions/icnet.json"
+        if "digikey" in self._adapter_names:
+            return "data/sessions/digikey.json"
+        if "mouser" in self._adapter_names:
+            return "data/sessions/mouser.json"
+        return None

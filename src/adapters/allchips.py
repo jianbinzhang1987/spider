@@ -33,31 +33,43 @@ class AllchipsAdapter(BrowserAdapter):
 
     SEARCH_URL = "https://www.allchips.com/search"
     MAX_CAPTCHA_RETRIES = 8
+    MANUAL_VERIFY_TIMEOUT_SECONDS = 180
 
-    def __init__(self, browser_pool: BrowserPool) -> None:
+    def __init__(self, browser_pool: BrowserPool, manual_verify: bool = True) -> None:
         super().__init__("硬之城", browser_pool)
         self._solver = CaptchaSolver()
+        self._manual_verify = manual_verify
 
     async def search_by_mpn(self, mpn: str) -> PartResult:
-        # Check if ddddocr is available before acquiring a browser page
+        # ddddocr is optional: when it is absent or unreliable, use manual fallback
+        ddddocr_available = True
         try:
             import ddddocr  # noqa: F401
         except ImportError:
-            logger.error("[硬之城] ddddocr not installed, skipping (pip install ddddocr)")
-            return self.failed_result(mpn, "ddddocr未安装，无法破解验证码(pip install ddddocr)")
+            ddddocr_available = False
+            logger.warning("[硬之城] ddddocr not installed, will use manual verification fallback")
 
         page = await self._new_page()
         try:
-            url = f"{self.SEARCH_URL}?keyword={mpn}"
+            url = f"{self.SEARCH_URL}?key={mpn}&sp=2"
             await page.goto(url, timeout=30000)
             await page.wait_for_timeout(6000)
 
             content = await page.content()
 
             if self._has_captcha(content):
-                solved = await self._solve_with_retries(page, mpn)
+                if self._pool.headless:
+                    return self.failed_result(
+                        mpn,
+                        "硬之城触发云之锁验证码；批量无头模式不会自动刷新验证码，请先在Web页面点击“验证硬之城”保存session",
+                    )
+                solved = False
+                if ddddocr_available and self._pool.headless:
+                    solved = await self._solve_with_retries(page, mpn)
                 if not solved:
-                    return self.failed_result(mpn, "验证码未通过(云之锁)")
+                    solved = await self._wait_for_manual_verification(page, url)
+                if not solved:
+                    return self.failed_result(mpn, "验证码未通过(云之锁)，自动识别失败且未完成人工验证")
                 # Captcha JS does location.reload() after solve — wait for it
                 await page.wait_for_timeout(4000)
                 try:
@@ -181,6 +193,44 @@ class AllchipsAdapter(BrowserAdapter):
                 bg_bytes, piece_bytes = new_images
 
         return False
+
+    async def _wait_for_manual_verification(self, page, target_url: str) -> bool:
+        """Let the user solve YunZhiSuo manually in a visible browser."""
+        if not self._manual_verify:
+            return False
+        if self._pool.headless:
+            logger.warning("[硬之城] 验证码需要人工处理，但当前是 headless 模式")
+            return False
+
+        logger.warning(
+            "[硬之城] 自动验证码识别失败，已弹出浏览器。请手动完成验证，程序会自动继续。"
+        )
+        try:
+            await page.bring_to_front()
+        except Exception:
+            pass
+
+        deadline = asyncio.get_running_loop().time() + self.MANUAL_VERIFY_TIMEOUT_SECONDS
+        while asyncio.get_running_loop().time() < deadline:
+            await page.wait_for_timeout(3000)
+            try:
+                html = await page.content()
+            except Exception:
+                continue
+            if not self._has_captcha(html):
+                return True
+            if self._normalize_text(self._target_mpn_from_url(target_url)) in self._normalize_text(html):
+                return True
+
+        return False
+
+    def _target_mpn_from_url(self, target_url: str) -> str:
+        """Extract the searched MPN from current Allchips URL formats."""
+        for marker in ("key=", "keyword="):
+            if marker in target_url:
+                value = target_url.split(marker, 1)[-1].split("&", 1)[0]
+                return value
+        return target_url
 
     async def _get_captcha_images(self, page) -> tuple[bytes, bytes] | None:
         """Extract canvas background and slider piece as bytes."""

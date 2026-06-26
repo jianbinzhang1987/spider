@@ -34,7 +34,7 @@ async def search_all(mpn: str, adapters: list[str] | None = None) -> list[PartRe
     results: list[PartResult] = []
     adapter_names = adapters or AdapterRegistry.list_adapters()
     browser_headless = _should_run_headless(adapter_names)
-    storage_state_path = "data/sessions/icdeal.json" if "icdeal" in adapter_names else None
+    storage_state_path = _storage_state_path(adapter_names)
 
     tasks = []
     instances = []
@@ -94,11 +94,31 @@ async def search_all(mpn: str, adapters: list[str] | None = None) -> list[PartRe
 
 
 def _should_run_headless(adapter_names: list[str]) -> bool:
-    """Use a visible browser for adapters that need manual user verification."""
+    """Run normal searches headless by default; use preflight for manual verification."""
     env_value = os.getenv("BROWSER_HEADLESS")
     if env_value is not None:
         return env_value.strip().lower() not in {"0", "false", "no"}
-    return "icdeal" not in adapter_names
+    return True
+
+
+def _storage_state_path(adapter_names: list[str]) -> str | None:
+    """Choose a browser session file for adapters that benefit from verification reuse."""
+    session_sites = {"icdeal", "allchips", "icgoo", "icnet", "digikey", "mouser"}.intersection(adapter_names)
+    if len(session_sites) > 1:
+        return "data/sessions/browser_state.json"
+    if "icdeal" in adapter_names:
+        return "data/sessions/icdeal.json"
+    if "allchips" in adapter_names:
+        return "data/sessions/allchips.json"
+    if "icgoo" in adapter_names:
+        return "data/sessions/icgoo.json"
+    if "icnet" in adapter_names:
+        return "data/sessions/icnet.json"
+    if "digikey" in adapter_names:
+        return "data/sessions/digikey.json"
+    if "mouser" in adapter_names:
+        return "data/sessions/mouser.json"
+    return None
 
 
 async def main():

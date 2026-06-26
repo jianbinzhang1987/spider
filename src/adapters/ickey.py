@@ -10,20 +10,25 @@ Alternative: Use the HTTP search page directly (curl_cffi fallback).
 from __future__ import annotations
 
 import logging
+import re
+from urllib.parse import quote
 from typing import Any
 
-from src.adapters.base import HttpAdapter
+from curl_cffi.requests import AsyncSession
+
+from src.adapters.base import BrowserAdapter
 from src.adapters.registry import AdapterRegistry
 from src.config import get
+from src.core.browser_pool import BrowserPool
 from src.models import PartResult
 
 logger = logging.getLogger(__name__)
 
-SEARCH_URL = "https://www.ickey.cn/search/product"
+SEARCH_URL = "https://search.ickey.cn/"
 
 
 @AdapterRegistry.register("ickey")
-class IckeyAdapter(HttpAdapter):
+class IckeyAdapter(BrowserAdapter):
     """云汉芯城 adapter — API with HTTP fallback.
 
     Strategy:
@@ -31,8 +36,8 @@ class IckeyAdapter(HttpAdapter):
     2. Otherwise, attempt HTTP search page (may hit captcha from overseas)
     """
 
-    def __init__(self) -> None:
-        super().__init__("云汉芯城", timeout=20.0, min_interval=1.0)
+    def __init__(self, browser_pool: BrowserPool) -> None:
+        super().__init__("云汉芯城", browser_pool)
         self._api_key = get("ickey.api_key")
         self._api_secret = get("ickey.api_secret")
 
@@ -44,19 +49,19 @@ class IckeyAdapter(HttpAdapter):
     async def _search_via_api(self, mpn: str) -> PartResult:
         """Search using official ickey.cn data API."""
         try:
-            client = self._get_client()
-            resp = await client.get(
-                "https://www.ickey.cn/rest/search/product",
-                params={
-                    "keyword": mpn,
-                    "apiKey": self._api_key,
-                    "secret": self._api_secret,
-                    "pageNumber": 1,
-                    "pageSize": 10,
-                },
-                headers={"Accept": "application/json"},
-                timeout=20,
-            )
+            async with AsyncSession(impersonate="chrome124", timeout=20) as client:
+                resp = await client.get(
+                    "https://www.ickey.cn/rest/search/product",
+                    params={
+                        "keyword": mpn,
+                        "apiKey": self._api_key,
+                        "secret": self._api_secret,
+                        "pageNumber": 1,
+                        "pageSize": 10,
+                    },
+                    headers={"Accept": "application/json"},
+                    timeout=20,
+                )
 
             if resp.status_code != 200:
                 logger.warning(f"[云汉芯城] API returned {resp.status_code}, falling back to HTTP")
@@ -69,27 +74,23 @@ class IckeyAdapter(HttpAdapter):
             return await self._search_via_http(mpn)
 
     async def _search_via_http(self, mpn: str) -> PartResult:
-        """Fallback: search via HTTP (curl_cffi with TLS fingerprint)."""
+        """Fallback: render the public search page and parse loaded results."""
+        page = await self._new_page()
         try:
-            client = self._get_client()
-            resp = await client.get(
-                f"https://www.ickey.cn/search/product?keyword={mpn}",
-                headers={
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-                    "Referer": "https://www.ickey.cn/",
-                },
-                timeout=15,
-            )
-
-            if resp.status_code != 200:
-                return self.failed_result(mpn, f"HTTP {resp.status_code}")
-
-            html = resp.text
-            return self._parse_html(mpn, html)
+            url = f"{SEARCH_URL}?keyword={quote(mpn)}&bom_ab=null"
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(10000)
+            content = await page.content()
+            try:
+                body_text = await page.locator("body").inner_text(timeout=5000)
+            except Exception:
+                body_text = ""
+            return self._parse_html(mpn, f"{content}\n{body_text}", page.url)
         except Exception as e:
-            logger.error(f"[云汉芯城] HTTP search failed: {e}")
+            logger.error(f"[云汉芯城] browser search failed: {e}")
             return self.failed_result(mpn, str(e))
+        finally:
+            await self._release_page(page)
 
     def _parse_api_response(self, mpn: str, data: dict) -> PartResult:
         """Parse official API JSON response."""
@@ -127,24 +128,29 @@ class IckeyAdapter(HttpAdapter):
 
         return self.success_result(mpn, result_data)
 
-    def _parse_html(self, mpn: str, html: str) -> PartResult:
+    def _parse_html(self, mpn: str, html: str, url: str | None = None) -> PartResult:
         """Fallback: parse HTML search results."""
-        import re
         mpn_norm = self._normalize_text(mpn)
 
         if mpn_norm not in self._normalize_text(html):
             return self.not_found_result(mpn)
 
-        prices = re.findall(r'[￥¥]\s*(\d+\.?\d*)', html)
+        prices = re.findall(r"[￥¥]\s*(\d+(?:\.\d+)?)", html)
         price_values = [float(p) for p in prices if 0.001 < float(p) < 100000]
 
         brand = None
-        brand_match = re.search(r'(?:品牌|brand|厂商)[^>]*>([^<]{2,30})<', html, re.I)
+        brand_match = re.search(
+            r"(?:品牌|brand|厂商)[：:\s]*([A-Za-z0-9\u4e00-\u9fff（）()/ .,&\-]{2,40})",
+            html,
+            re.I,
+        )
         if brand_match:
-            brand = brand_match.group(1).strip()
+            candidate = brand_match.group(1).strip()
+            if "href" not in candidate and "page" not in candidate and "http" not in candidate:
+                brand = candidate
 
         stock = None
-        stock_match = re.search(r'(?:库存|stock|现货)[^>]*>(\d[\d,]*)', html, re.I)
+        stock_match = re.search(r"(?:库存|stock|现货)[：:\s]*(\d[\d,]*)", html, re.I)
         if stock_match:
             stock = self._to_int(stock_match.group(1))
 
@@ -152,10 +158,15 @@ class IckeyAdapter(HttpAdapter):
             "mpn": mpn,
             "brand": brand,
             "stock": stock,
-            "product_url": f"https://www.ickey.cn/search/product?keyword={mpn}",
+            "product_url": url or f"{SEARCH_URL}?keyword={quote(mpn)}",
         }
 
         if price_values:
             result_data["price_unit"] = min(price_values)
+        else:
+            return self.failed_result(
+                mpn,
+                "云汉页面返回了型号但未返回可解析价格，可能需要登录、询价或前端接口字段已变化",
+            )
 
         return self.success_result(mpn, result_data)

@@ -9,6 +9,7 @@ from typing import Any
 
 from src.adapters.base import BrowserAdapter
 from src.adapters.registry import AdapterRegistry
+from src.config import get
 from src.core.browser_pool import BrowserPool
 from src.models import PartResult, PriceBreak
 
@@ -29,6 +30,8 @@ class IcgooAdapter(BrowserAdapter):
           but return JSON when called within a browser session.
     """
 
+    LOGIN_URL = "https://www.icgoo.net/login.html"
+
     def __init__(self, browser_pool: BrowserPool) -> None:
         super().__init__("ICGOO", browser_pool)
 
@@ -36,9 +39,12 @@ class IcgooAdapter(BrowserAdapter):
         page = await self._new_page()
         try:
             api_data: dict[str, Any] = {}
+            blocked_resources: list[str] = []
 
             async def capture_response(response):
                 url = response.url
+                if response.status in (401, 403) and "media.icgoo.net" in url:
+                    blocked_resources.append(url)
                 # Capture any API response from icgoo backend
                 if "icgoo.net/api/" in url or "v8back.icgoo.net" in url:
                     try:
@@ -62,8 +68,20 @@ class IcgooAdapter(BrowserAdapter):
 
             page.on("response", capture_response)
             url = f"https://www.icgoo.net/search/{mpn}/1"
-            await page.goto(url, timeout=30000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(12000)
+
+            if await self._page_needs_login_or_reload(page, mpn, blocked_resources):
+                logged_in = await self._ensure_login(page)
+                if not logged_in:
+                    return self.failed_result(
+                        mpn,
+                        "ICGOO关键静态资源加载失败或登录组件未加载，无法获取搜索结果；请用可见浏览器完成登录后重试",
+                    )
+                api_data.clear()
+                blocked_resources.clear()
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(12000)
 
             # Try API-intercepted data first
             if api_data.get("supplier"):
@@ -104,6 +122,11 @@ class IcgooAdapter(BrowserAdapter):
                     if detail_price is not None:
                         result.price_unit = detail_price
                         result.product_url = detail_url
+                if result.price_unit is None:
+                    return self.failed_result(
+                        mpn,
+                        "ICGOO返回了匹配型号但未返回可解析价格，可能需要登录权限、询价或关键资源未完整加载",
+                    )
 
             return result
         except Exception as e:
@@ -111,6 +134,87 @@ class IcgooAdapter(BrowserAdapter):
             return self.failed_result(mpn, str(e))
         finally:
             await self._release_page(page)
+
+    async def _page_needs_login_or_reload(
+        self,
+        page,
+        mpn: str,
+        blocked_resources: list[str],
+    ) -> bool:
+        """Detect the empty shell caused by blocked static assets or missing session."""
+        try:
+            content = await page.content()
+            body_text = await page.locator("body").inner_text(timeout=3000)
+        except Exception:
+            return True
+        if blocked_resources:
+            logger.warning("[ICGOO] static resources blocked: %s", len(blocked_resources))
+            return True
+        if self._normalize_text(mpn) in self._normalize_text(content):
+            return False
+        footer_only_markers = ["粤公网安备", "粤ICP备", "营业执照"]
+        if all(marker in body_text for marker in footer_only_markers) and len(body_text) < 300:
+            return True
+        return False
+
+    async def _ensure_login(self, page) -> bool:
+        """Login to ICGOO using configured credentials or wait for manual login."""
+        username = get("icgoo.username")
+        password = get("icgoo.password")
+
+        try:
+            await page.goto(self.LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(8000)
+        except Exception:
+            return False
+
+        if await self._is_logged_in(page):
+            return True
+
+        visible_inputs = page.locator("input:visible")
+        input_count = await visible_inputs.count()
+        if input_count >= 2 and username and password:
+            try:
+                user_input = visible_inputs.nth(0)
+                pass_input = page.locator(
+                    'input[type="password"]:visible, input[placeholder*="密码"]:visible'
+                ).first
+                await user_input.fill(username)
+                await pass_input.fill(password)
+                submit = page.locator(
+                    'button:has-text("登录"), a:has-text("登录"), button[type="submit"]'
+                ).first
+                await submit.click()
+                await page.wait_for_timeout(8000)
+                if await self._is_logged_in(page):
+                    return True
+            except Exception as e:
+                logger.warning("[ICGOO] configured login failed: %s", e)
+
+        if self._pool.headless:
+            return False
+
+        logger.warning("[ICGOO] 请在弹出的浏览器中手动登录，程序会自动继续。")
+        try:
+            await page.bring_to_front()
+        except Exception:
+            pass
+
+        import asyncio
+        deadline = asyncio.get_running_loop().time() + 180
+        while asyncio.get_running_loop().time() < deadline:
+            await page.wait_for_timeout(3000)
+            if await self._is_logged_in(page):
+                return True
+        return False
+
+    async def _is_logged_in(self, page) -> bool:
+        try:
+            text = await page.locator("body").inner_text(timeout=3000)
+        except Exception:
+            return False
+        login_markers = ["退出", "会员中心", "个人中心", "我的订单", "购物车"]
+        return any(marker in text for marker in login_markers)
 
     async def _find_product_link(self, page, mpn: str) -> str | None:
         """Try to find a product detail link on the search results page."""

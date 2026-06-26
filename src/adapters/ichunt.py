@@ -148,13 +148,17 @@ class IchuntAdapter(BrowserAdapter):
                             if isinstance(lb, dict):
                                 qty = lb.get("purchases") or lb.get("qty") or lb.get("num") or lb.get("quantity")
                                 p = lb.get("price_cn") or lb.get("price") or lb.get("unit_price") or lb.get("cny_price")
-                                if qty and p:
+                                if p:
                                     try:
-                                        price_breaks.append({"quantity": int(qty), "unit_price": float(p)})
+                                        price_value = float(p)
                                     except (ValueError, TypeError):
-                                        pass
+                                        continue
+                                    if not (0.0001 < price_value < 100000):
+                                        continue
+                                    qty_value = self._to_int(qty) or 1
+                                    price_breaks.append({"quantity": qty_value, "unit_price": price_value})
                         if not price and price_breaks:
-                            price = price_breaks[0]["unit_price"]
+                            price = min(pb["unit_price"] for pb in price_breaks)
 
                     # Also try nested "offer" or "supplier" structures
                     if not price:
@@ -181,17 +185,31 @@ class IchuntAdapter(BrowserAdapter):
                         best_match["_price_breaks"] = price_breaks
 
         if best_match:
+            price_breaks = best_match.get("_price_breaks", [])
+            if best_price is None and price_breaks:
+                best_price = min(pb["unit_price"] for pb in price_breaks)
             return self.success_result(mpn, {
                 "mpn": best_match.get("goods_name") or best_match.get("goods_sn") or mpn,
                 "brand": best_match.get("brand_name") or best_match.get("brand"),
                 "stock": best_match.get("stock") or best_match.get("goods_number") or best_match.get("number"),
                 "price_unit": best_price,
-                "price_breaks": best_match.get("_price_breaks", []),
+                "price_breaks": price_breaks,
                 "package": best_match.get("encap") or best_match.get("package"),
+                "lead_time": self._format_lead_time(best_match),
                 "product_url": f"https://www.ichunt.com/s/?k={mpn}",
             })
 
         return self.not_found_result(mpn)
+
+    def _format_lead_time(self, item: dict[str, Any]) -> str | None:
+        parts = []
+        cn = item.get("cn_delivery_time_origin") or item.get("cn_delivery_time")
+        if cn:
+            parts.append(f"大陆{cn if '工作日' in str(cn) else str(cn) + '工作日'}")
+        hk = item.get("hk_delivery_time_origin") or item.get("hk_delivery_time")
+        if hk:
+            parts.append(f"香港{hk if '工作日' in str(hk) else str(hk) + '工作日'}")
+        return "；".join(parts) if parts else None
 
     def _parse_dom(self, mpn: str, html: str) -> PartResult:
         """Fallback: parse rendered DOM for product data."""

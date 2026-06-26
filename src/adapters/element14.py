@@ -11,7 +11,9 @@ Docs: https://partner.element14.com/docs
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
+from html import unescape
 
 from src.adapters.base import HttpAdapter
 from src.adapters.registry import AdapterRegistry
@@ -34,7 +36,7 @@ class Element14Adapter(HttpAdapter):
 
     async def search_by_mpn(self, mpn: str) -> PartResult:
         if not self._api_key:
-            return self.failed_result(mpn, "缺少ELEMENT14_API_KEY")
+            return await self._search_via_web(mpn)
 
         try:
             client = self._get_client()
@@ -60,6 +62,27 @@ class Element14Adapter(HttpAdapter):
             return self._parse_response(mpn, data)
         except Exception as e:
             logger.error(f"[element14] search failed: {e}")
+            return self.failed_result(mpn, str(e))
+
+    async def _search_via_web(self, mpn: str) -> PartResult:
+        """Fallback: parse the public element14/e络盟 product page."""
+        try:
+            client = self._get_client()
+            resp = await client.get(
+                "https://cn.element14.com/search",
+                params={"st": mpn},
+                headers={
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    "Referer": "https://cn.element14.com/",
+                },
+                timeout=25,
+            )
+            if resp.status_code != 200:
+                return self.failed_result(mpn, f"网页返回 {resp.status_code}")
+            return self._parse_web_page(mpn, resp.text, str(resp.url))
+        except Exception as e:
+            logger.error(f"[element14] web fallback failed: {e}")
             return self.failed_result(mpn, str(e))
 
     def _parse_response(self, mpn: str, data: dict) -> PartResult:
@@ -101,4 +124,53 @@ class Element14Adapter(HttpAdapter):
                 result_data["datasheet_url"] = doc["url"]
                 break
 
+        return self.success_result(mpn, result_data)
+
+    def _parse_web_page(self, mpn: str, html: str, url: str) -> PartResult:
+        mpn_norm = self._normalize_text(mpn)
+        if mpn_norm not in self._normalize_text(html):
+            return self.not_found_result(mpn)
+
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+        title = unescape(re.sub(r"\s+", " ", title_match.group(1)).strip()) if title_match else ""
+        brand = None
+        if title:
+            parts = title.split()
+            for i, part in enumerate(parts):
+                if self._normalize_text(part) == mpn_norm and i + 1 < len(parts):
+                    brand = parts[i + 1].strip(",|")
+                    break
+
+        sku_match = re.search(r"/dp/([A-Z0-9]+)", url, re.I) or re.search(r"/dp/([A-Z0-9]+)", html, re.I)
+        stock_match = re.search(r'"totalCount"\s*:\s*(\d+)', html)
+        lead_match = re.search(r'"replenishmentLeadTimeInDays"\s*:\s*(\d+)', html)
+
+        price_breaks = []
+        seen = set()
+        for qty, price, ccy in re.findall(
+            r'"minimumQuantity"\s*:\s*(\d+).*?"bestPriceValue"\s*:\s*"([\d.]+)".*?"bestPriceCurrencyIsoCode"\s*:\s*"([A-Z]+)"',
+            html,
+            re.S,
+        ):
+            key = (qty, price, ccy)
+            if key in seen:
+                continue
+            seen.add(key)
+            price_breaks.append({"quantity": qty, "unit_price": price})
+
+        if not price_breaks:
+            return self.failed_result(mpn, "element14网页返回了型号但未返回可解析价格")
+
+        result_data: dict[str, Any] = {
+            "mpn": mpn,
+            "sku": sku_match.group(1) if sku_match else None,
+            "brand": brand,
+            "description": title,
+            "stock": stock_match.group(1) if stock_match else None,
+            "moq": price_breaks[0]["quantity"],
+            "product_url": url,
+            "price_breaks": price_breaks,
+            "price_unit": price_breaks[0]["unit_price"],
+            "lead_time": f"{lead_match.group(1)}天" if lead_match else None,
+        }
         return self.success_result(mpn, result_data)

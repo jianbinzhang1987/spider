@@ -17,7 +17,7 @@ from src.models import PartResult
 logger = logging.getLogger(__name__)
 
 # Session state file for persistent login
-SESSION_FILE = Path.home() / ".spider_sessions" / "icnet_state.json"
+SESSION_FILE = Path("data/sessions/icnet.json")
 
 
 @AdapterRegistry.register("icnet")
@@ -33,7 +33,7 @@ class IcnetAdapter(BrowserAdapter):
     """
 
     LOGIN_URL = "https://member.ic.net.cn/login.php"
-    SEARCH_URL = "https://www.ic.net.cn/search.php"
+    SEARCH_URL = "https://www.ic.net.cn/search/{mpn}.html"
 
     def __init__(self, browser_pool: BrowserPool, username: str = "", password: str = "") -> None:
         super().__init__("IC交易网", browser_pool)
@@ -49,12 +49,17 @@ class IcnetAdapter(BrowserAdapter):
                 await self._load_session(page)
 
             # Attempt search
-            url = f"{self.SEARCH_URL}?q={mpn}"
+            url = self.SEARCH_URL.format(mpn=mpn)
             await page.goto(url, timeout=20000)
             await page.wait_for_timeout(5000)
 
             # Check if redirected to login
             if "login" in page.url or "member.ic.net.cn" in page.url:
+                if self._pool.headless:
+                    return self.failed_result(
+                        mpn,
+                        "IC交易网需要登录；批量无头模式不会弹出登录页，请先在Web页面点击“验证IC交易网”保存session",
+                    )
                 self._logged_in = False
                 login_ok = await self._login(page)
                 if not login_ok:
@@ -156,6 +161,29 @@ class IcnetAdapter(BrowserAdapter):
                     return True
 
             logger.warning("[IC交易网] Login failed")
+            if self._pool.headless:
+                return False
+            logger.warning("[IC交易网] 请在弹出的浏览器中手动登录，程序会自动继续。")
+            try:
+                await page.bring_to_front()
+            except Exception:
+                pass
+            import asyncio
+            deadline = asyncio.get_running_loop().time() + 300
+            while asyncio.get_running_loop().time() < deadline:
+                await page.wait_for_timeout(3000)
+                if "login" not in page.url and "member.ic.net.cn" not in page.url:
+                    self._logged_in = True
+                    await self._save_session(page)
+                    return True
+                try:
+                    text = await page.locator("body").inner_text(timeout=2000)
+                    if any(marker in text for marker in ["退出", "会员中心", "我的", "发布库存"]):
+                        self._logged_in = True
+                        await self._save_session(page)
+                        return True
+                except Exception:
+                    pass
             return False
         except Exception as e:
             logger.error(f"[IC交易网] Login error: {e}")
